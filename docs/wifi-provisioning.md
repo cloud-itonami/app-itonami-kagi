@@ -42,3 +42,27 @@ The pinned kagitaba commit is reachable. The test uses the real noble crypto and
 kagi actor/Governor but an in-memory backend. It verifies encryption/reveal,
 secret-free graph metadata/ledger, foreign-account/Node/expiry/consent refusal,
 viewer refusal and manual fallback while the vault is locked.
+
+## Replica read-back boundary (2026-10-07)
+
+`kagi.wifi-replica/replicate!` sends an already sealed block to configured host
+providers and reads each reference back before issuing a receipt. A trusted host
+SHA256 digest verifies content and length. `object-key` accepts only hashed
+account/item identifiers. Receipts contain no plaintext or vault keys. The host
+must store these receipts inside the account vault, and provide versioned,
+immutable object writes or IPFS content references. Provider credentials stay in
+the host and must never be returned to the companion view.
+
+Distinct origins prevent accidental duplicate adapter configuration; they do
+not establish independent operators or physical replicas. `verified-readbacks`
+is the number of successful retrievals, not a decentralization claim. A real
+qualification must record the configured operators and repeat retrieval from a
+fresh process after restart.
+
+The fixture runtime verifies read-back and refuses corrupt bytes:
+`kbb --backend sci --config nbb.edn --classpath src:test test/kagi/wifi_replica_runtime.cljk`.
+This is not a live storage connection. Current Mac inspection found no configured
+storage environment variables or the documented Keychain service
+`b2:com-junkawasaki-kagi`. The existing vault could not be loaded by the current
+read-only SCI seam; it was not modified or migrated. Production endpoint,
+credentials and verified account-to-vault binding remain required.
