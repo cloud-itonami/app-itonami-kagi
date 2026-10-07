@@ -66,3 +66,19 @@ storage environment variables or the documented Keychain service
 `b2:com-junkawasaki-kagi`. The existing vault could not be loaded by the current
 read-only SCI seam; it was not modified or migrated. Production endpoint,
 credentials and verified account-to-vault binding remain required.
+
+## Production connection investigation follow-up
+
+The previous local SCI load failure was traced to the generic EDN 8MiB whole
+input cap. The existing local vault is larger. Node `persist/load*` now checks
+file size before reading and uses a scoped synchronous 32MiB whole-file cap;
+string/token/depth/node/tag bounds remain unchanged, as does the generic network
+EDN cap. Reading the existing vault and Keychain unlock succeeded. No vault
+migration, write or key change was performed.
+
+The documented `com-junkawasaki-kagi-b2` item was absent. Narrow storage-related
+metadata lookup found only archive-encryption master-key entries, which are not
+storage transport credentials and are not used for Murakumo Wi-Fi. Production
+account identity, account-to-vault binding and a configured endpoint credential
+reference are still required. Do not substitute an archive key or silently bind
+all authenticated accounts to the operator's local vault.
