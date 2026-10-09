@@ -1,0 +1,17 @@
+(ns kagi.local-edn-test
+  "Request and grant files carry post-quantum public keys whose base64 tokens
+  are longer than kotoba.lang.edn's 4096-character token limit, so the CLI
+  reads them with the bounded local reader instead."
+  (:require [clojure.test :refer [deftest is]]
+            [kotoba.lang.edn :as edn]
+            [kagi.local-edn :as local-edn]))
+
+(deftest reads-a-request-with-a-long-key-token
+  (let [k (apply str (repeat 6000 "A"))
+        f (java.io.File/createTempFile "agent-request" ".edn")
+        text (pr-str {:agent/id "a" :agent/kem-pk k})]
+    (try
+      (spit f text)
+      (is (thrown? Exception (edn/read-string text)) "the generic reader caps tokens")
+      (is (= k (:agent/kem-pk (local-edn/read-file (str f)))))
+      (finally (.delete f)))))
