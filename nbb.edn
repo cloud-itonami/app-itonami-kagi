@@ -52,7 +52,7 @@
          :git/sha "577a59a9d5eb3ef90b81342f4673973f481ff7f4"}
         io.github.kotoba-lang/kagitaba
         {:git/url "https://github.com/kotoba-lang/kagitaba.git"
-         :git/sha "91a96218b48757ca988d8467824e766317f2ca11"}
+         :git/sha "713c6976258f7a4863232922a701a8177f250d26"}
         io.github.kotoba-lang/json
         {:git/url "https://github.com/kotoba-lang/json.git"
          :git/sha "15fd195ac41e6268e2005ccbf6cb9924e81e65e2"}
