@@ -26,6 +26,10 @@
     "./mithril-vault": {
       "types": "./sdk/vault.d.mts",
       "default": "./sdk/vault.mjs"
+    },
+    "./mithril-transfer": {
+      "types": "./sdk/transfer.d.mts",
+      "default": "./sdk/transfer.mjs"
     }
   },
   "files": [
