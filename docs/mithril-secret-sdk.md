@@ -15,8 +15,9 @@ a fresh device still needs authenticated state transfer from an existing device.
 
 This API does NOT implement the governed vault actor, password derivation, device
 admission, PQC recipient sharing, recovery UX, browser autofill or account login.
-Do not describe the symmetric adapter as a complete PQC vault. Those remain the
-existing CLJK components or follow-up integration work. A server cannot validate
+Do not describe the symmetric adapter as a complete PQC vault. The separate `mithril-transfer` adapter adds classical X25519 offline device
+enrollment and encrypted recovery snapshots; see `mithril-sdk.md`. It does not
+replace the governed CLJK actor or its PQC protocol. A server cannot validate
 that a user's ciphertext actually contains a secret rather than arbitrary bytes.
 
 `openSecret` returns plaintext only to the caller. Use only in a trusted main

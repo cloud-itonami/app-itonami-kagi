@@ -25,6 +25,7 @@ export function createDeviceRequest(ownerId, now = Date.now()) {
   return { request, privateKey, fingerprint: deviceFingerprint(request) };
 }
 function encrypt(key, aad, snapshot) {
+  if (typeof snapshot !== 'string' || snapshot.length > 16777216) fail();
   const plain = enc.encode(snapshot), nonce = randomBytes(12);
   if (plain.length > 16777216) fail();
   try { return { nonce: hex(nonce), ciphertext: hex(gcm(key, nonce, aad).encrypt(plain)) }; }
@@ -57,7 +58,9 @@ export function sealDeviceTransfer(request, confirmedFingerprint, snapshot, now 
   } finally { ephemeral.fill(0); derived?.fill(0); }
 }
 export function transferFingerprint(transfer) {
-  if (!transfer || transfer.format !== 'kagi-device-transfer-v1') fail();
+  if (!transfer || Object.keys(transfer).length !== 5 || transfer.format !== 'kagi-device-transfer-v1' ||
+      typeof transfer.ciphertext !== 'string' || transfer.ciphertext.length < 32 || transfer.ciphertext.length > 33554464 || transfer.ciphertext.length % 2) fail();
+  unhex(transfer.ephemeralPublicKey, 32); unhex(transfer.nonce, 12);
   return hex(sha256(enc.encode(JSON.stringify([transfer.format, deviceFingerprint(transfer.request), transfer.ephemeralPublicKey, transfer.nonce, transfer.ciphertext]))));
 }
 export function openDeviceTransfer(privateKey, expectedRequest, transfer, confirmedSenderFingerprint, now = Date.now()) {
