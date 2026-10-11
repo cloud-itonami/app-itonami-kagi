@@ -1,0 +1,21 @@
+(ns kagi.mithril-sdk-interop-test
+  (:require [cljs.test :refer [deftest is run-tests]]
+            [kagi.crypto :as c]
+            [kagi.crypto.noble :as noble]
+            ["node:fs" :as fs]))
+(defn bytes [s] (js/Uint8Array.from (js/Buffer.from s "base64url")))
+(deftest javascript-adapter-opens-through-existing-provider
+  (let [v (js/JSON.parse (fs/readFileSync "sdk/fixtures/interop.json" "utf8"))
+        ctx (.-context v) e (.-envelope v)
+        aad (c/utf8-bytes (js/JSON.stringify
+                          #js ["kagi-secret-v1" (.-ownerId ctx) (.-vaultId ctx)
+                               (.-itemId ctx) (.-generation ctx)]))
+        p (noble/noble-provider)
+        key (c/hkdf p (js/Uint8Array.from (.-key v)) (c/empty-bytes) aad 32)
+        plaintext (c/aead-open p key (bytes (.-nonce e)) (bytes (.-ciphertext e)) aad)
+        item (js/JSON.parse (.toString (js/Buffer.from plaintext) "utf8"))]
+    (is (= "synthetic-only" (.-value item)))
+    (is (= "kagitaba-secret-v1" (.-format item)))))
+(defn -main [& _]
+  (let [r (run-tests 'kagi.mithril-sdk-interop-test)]
+    (when (pos? (+ (:fail r) (:error r))) (js/process.exit 1))))

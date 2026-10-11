@@ -1,0 +1,55 @@
+{
+  "key": [
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42,
+    42
+  ],
+  "context": {
+    "ownerId": "synthetic-owner",
+    "vaultId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "itemId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "generation": 1
+  },
+  "item": {
+    "format": "kagitaba-secret-v1",
+    "id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "title": "Synthetic",
+    "key": "API_KEY",
+    "value": "synthetic-only"
+  },
+  "envelope": {
+    "format": "kagi-secret-v1",
+    "algorithm": "AES-256-GCM-HKDF-SHA256",
+    "nonce": "Bl1SQNDrnsaee8eZ",
+    "ciphertext": "wN_kDucz-PHzmjtvrsHJx3faPxUpKjwurJJYpx4NQCfyWgIErhwFe-FubjXbmgZXyq4g1P9oolgkMfjU01aEHTdHwdThqj-CtOWEjiMy6ntsd3hUf4hXWFQvFm4ScuXWQqLxWsrAEjgLP64s7iOx62VC80MzjSZqHIaVIO2U2y6cLaO4OGC9C5jTOmqdkQfOgpgDDA"
+  }
+}
