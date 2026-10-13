@@ -66,7 +66,7 @@
         ;; ADR-2607023000)。kagi は kagitaba item を pr-str して DEK 封緘パイプラインに通す。
         io.github.kotoba-lang/kagitaba
         {:git/url "https://github.com/kotoba-lang/kagitaba.git"
-         :git/sha "713c6976258f7a4863232922a701a8177f250d26"}
+         :git/sha "7cabb191479706fcd659f73cb4ac42fd05da969f"}
         ;; Shared fail-closed ABAC/control semantics. kagi owns only the
         ;; vault-specific attribute adapter and enforcement point.
         io.github.kotoba-lang/security

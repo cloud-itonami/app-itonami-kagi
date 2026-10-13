@@ -1,0 +1,205 @@
+(ns kagi.issuer.github-app
+  "GitHub App issuer (ADR-0003 §1): one long-lived root (the App's private key,
+  kept in the vault) that mints installation access tokens of at most one hour,
+  narrowed to the repositories and permissions a request names.
+
+  ## Setup without a person handling a token
+
+  GitHub's App Manifest flow: kagi builds the manifest, the owner presses
+  \"Create GitHub App\" (and then \"Install\") in the browser, GitHub redirects
+  back to kagi's loopback page with a one-time `code`, and
+  `POST /app-manifests/{code}/conversions` returns the App id, slug and
+  private key, which kagi seals straight into an issuer item. The owner never
+  sees or copies a credential.
+
+  ## Minting
+
+  JWT (RS256, `iss` = App id, at most 10 minutes) → `POST
+  /app/installations/{id}/access_tokens` with `repositories` and
+  `permissions`, both a subset of the App's. One installation per token, so
+  one request covers repositories of one account.
+
+  HTTP is a function `(http {:method :url :headers :body}) → {:status :body}`
+  so the whole flow runs against a fake in tests."
+  (:require [kotoba.bytes :as kbytes]
+            [kotoba.lang.text :as str]
+            [kagitaba.issuer :as kissuer])
+  #?(:clj (:import [java.security KeyFactory Signature]
+                   [java.security.spec PKCS8EncodedKeySpec]
+                   [java.net URI]
+                   [java.net.http HttpClient HttpRequest HttpRequest$BodyPublishers
+                    HttpResponse$BodyHandlers])))
+
+(def api "https://api.github.com")
+
+(def default-permissions
+  "What fleet profiles need: read code, open pull requests."
+  {:contents :read :metadata :read :pull_requests :write})
+
+;; ── JSON (data.json loaded lazily, as agent-client does) ─────────────────
+
+#?(:clj (defn- read-json [s] ((requiring-resolve 'json.data-json/read-str) s :key-fn keyword)))
+#?(:clj (defn- write-json [v] ((requiring-resolve 'json.data-json/write-str) v)))
+
+;; ── manifest flow ─────────────────────────────────────────────────────────
+
+(defn manifest
+  "The App manifest kagi asks GitHub to create. No webhook: the App only mints
+  tokens."
+  [{app-name :name :keys [redirect-url permissions]}]
+  {:name app-name
+   :url "https://github.com/kotoba-lang/kagi"
+   :redirect_url redirect-url
+   :public false
+   :hook_attributes {:url "https://example.invalid/kagi-no-webhook" :active false}
+   :default_permissions (into {} (for [[k v] (or permissions default-permissions)] [(name k) (name v)]))
+   :default_events []})
+
+(defn create-url
+  "Where the manifest form posts: the user's account, or an organization."
+  [{:keys [org state]}]
+  (str "https://github.com/" (if org (str "organizations/" org "/settings/apps/new")
+                                 "settings/apps/new")
+       "?state=" state))
+
+(defn install-url [slug] (str "https://github.com/apps/" slug "/installations/new"))
+
+(defn conversion->issuer
+  "The conversion response → a kagitaba issuer item (EDN). The private key goes
+  into a `:concealed` field; everything else is public."
+  [conv installations]
+  {:item/category kissuer/category
+   :item/title (str "github-app: " (:slug conv))
+   :issuer/kind :github-app
+   :issuer/public {:app-id (:id conv)
+                   :slug (:slug conv)
+                   :owner (get-in conv [:owner :login])
+                   :installations (vec installations)
+                   :permissions (into {} (for [[k v] (:permissions conv)] [(keyword (name k)) (keyword v)]))}
+   :item/sections [{:section/fields [{:field/id "private-key" :field/type :concealed
+                                      :field/value (:pem conv)}]}]})
+
+(defn private-key-pem [issuer-item]
+  (some #(when (= "private-key" (:field/id %)) (:field/value %))
+        (mapcat :section/fields (:item/sections issuer-item))))
+
+;; ── RS256 JWT ─────────────────────────────────────────────────────────────
+
+(defn- der-length [n]
+  (if (< n 128)
+    [n]
+    (let [bs (loop [n n acc ()] (if (zero? n) acc (recur (quot n 256) (cons (bit-and n 0xff) acc))))]
+      (cons (bit-or 0x80 (count bs)) bs))))
+
+(defn- der [tag content]
+  (concat [tag] (der-length (count content)) content))
+
+(defn pkcs1->pkcs8
+  "Wrap a PKCS#1 RSAPrivateKey (what GitHub hands out, `BEGIN RSA PRIVATE KEY`)
+  in a PKCS#8 PrivateKeyInfo, which the JDK's KeyFactory reads."
+  [pkcs1-bytes]
+  (let [rsa-oid [0x06 0x09 0x2a 0x86 0x48 0x86 0xf7 0x0d 0x01 0x01 0x01]
+        alg (der 0x30 (concat rsa-oid [0x05 0x00]))]
+    (byte-array (map unchecked-byte (der 0x30 (concat [0x02 0x01 0x00] alg (der 0x04 (map #(bit-and % 0xff) pkcs1-bytes))))))))
+
+(defn- pem-body [pem]
+  (->> (str/split-lines pem)
+       (remove #(str/starts-with? % "-----"))
+       (str/join "")
+       str/trim))
+
+(defn- b64url [b] (kbytes/base64url-encode (vec b) {:pad? false}))
+
+#?(:clj
+   (defn jwt
+     "App JWT valid from 60 s ago (clock skew) for 9 minutes."
+     [app-id pem now-sec]
+     (let [der-bytes (kbytes/base64-decode-bytes (pem-body pem))
+           pkcs8 (if (str/includes? pem "BEGIN RSA PRIVATE KEY") (pkcs1->pkcs8 der-bytes) der-bytes)
+           key (.generatePrivate (KeyFactory/getInstance "RSA") (PKCS8EncodedKeySpec. pkcs8))
+           head (b64url (kbytes/utf8-bytes (write-json {:alg "RS256" :typ "JWT"})))
+           body (b64url (kbytes/utf8-bytes (write-json {:iat (- now-sec 60) :exp (+ now-sec 540)
+                                                         :iss (str app-id)})))
+           signing-input (str head "." body)
+           sig (doto (Signature/getInstance "SHA256withRSA") (.initSign key)
+                 (.update (kbytes/utf8-bytes signing-input)))]
+       (str signing-input "." (b64url (.sign sig))))))
+
+;; ── HTTP ──────────────────────────────────────────────────────────────────
+
+#?(:clj
+   (defn java-http
+     "Default http fn over java.net.http."
+     [{:keys [method url headers body]}]
+     (let [b (-> (HttpRequest/newBuilder (URI. url))
+                 (.method (str/upper (name method))
+                          (if body (HttpRequest$BodyPublishers/ofString body)
+                              (HttpRequest$BodyPublishers/noBody))))]
+       (doseq [[k v] headers] (.header b k v))
+       (let [res (.send (HttpClient/newHttpClient) (.build b) (HttpResponse$BodyHandlers/ofString))]
+         {:status (.statusCode res) :body (.body res)}))))
+
+#?(:clj
+   (defn- call [http method path auth & [body]]
+     (let [res (http {:method method :url (str api path)
+                      :headers (cond-> {"Accept" "application/vnd.github+json"
+                                        "X-GitHub-Api-Version" "2022-11-28"
+                                        "User-Agent" "kagi-credential-broker"}
+                                 auth (assoc "Authorization" auth)
+                                 body (assoc "Content-Type" "application/json"))
+                      :body (some-> body write-json)})]
+       (when-not (<= 200 (:status res) 299)
+         (throw (ex-info (str "GitHub " (name method) " " path " → " (:status res))
+                         {:status (:status res)
+                          ;; GitHub's error bodies carry no secret; tokens never echo back.
+                          :message (some-> (:body res) (subs 0 (min 300 (count (:body res)))))})))
+       (some-> (:body res) not-empty read-json))))
+
+#?(:clj
+   (defn convert-manifest-code
+     "One-time code from the redirect → {:id :slug :pem :owner :permissions …}."
+     [http code]
+     (call http :post (str "/app-manifests/" code "/conversions") nil {})))
+
+#?(:clj
+   (defn list-installations [http app-id pem now-sec]
+     (vec (for [inst (call http :get "/app/installations" (str "Bearer " (jwt app-id pem now-sec)))]
+            {:id (:id inst) :account (get-in inst [:account :login])}))))
+
+(defn token-body
+  "The access_tokens request body for a capability inside one installation:
+  repository names (without the account) unless the request is account-wide."
+  [capability]
+  (let [resources (:capability/resources capability)
+        names (for [r resources :when (not (str/ends-with? r "/*"))]
+                (second (str/split r #"/")))]
+    (cond-> {:permissions (into {} (for [[k v] (:capability/access capability)] [(name k) (name v)]))}
+      (and (seq names) (= (count names) (count resources))) (assoc :repositories (vec names)))))
+
+(defn installation-of
+  "The single installation all of the capability's resources live in, or a
+  reason it has none."
+  [issuer-item capability]
+  (let [accounts (set (for [r (:capability/resources capability)] (first (str/split r #"/"))))]
+    (cond
+      (not= 1 (count accounts)) {:error :one-account-per-token :accounts (sort accounts)}
+      :else (or (kissuer/installation-for issuer-item (str (first accounts) "/x"))
+                {:error :not-installed :account (first accounts)}))))
+
+#?(:clj
+   (defn mint
+     "→ {:token :expires-at-sec}. Throws when GitHub refuses."
+     [http issuer-item capability now-sec]
+     (let [inst (installation-of issuer-item capability)]
+       (when (:error inst) (throw (ex-info "cannot mint for this capability" inst)))
+       (let [{:keys [app-id]} (:issuer/public issuer-item)
+             res (call http :post (str "/app/installations/" (:id inst) "/access_tokens")
+                       (str "Bearer " (jwt app-id (private-key-pem issuer-item) now-sec))
+                       (token-body capability))]
+         {:token (:token res)
+          :expires-at (:expires_at res)}))))
+
+#?(:clj
+   (defn revoke [http token]
+     (call http :delete "/installation/token" (str "token " token))
+     true))

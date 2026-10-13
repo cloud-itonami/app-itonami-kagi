@@ -1,0 +1,160 @@
+(ns kagi.broker-test
+  "ADR-0003 end to end against a fake GitHub: a request inside policy is issued
+  as an envelope only the requester can open; outside policy it waits for the
+  owner or is refused with reasons; revocation reaches GitHub through the
+  owner's sealed copy; the ledger holds leases, never values, and detects
+  tampering."
+  (:require [kotoba.lang.text :as str]
+            [kotoba.bytes :as kbytes]
+            [kotoba.test :refer [deftest testing is]]
+            [kagi.broker :as broker]
+            [kagi.crypto :as crypto]
+            [kagi.identity :as identity]
+            [kagi.lease-seal :as seal]
+            [kagi.issuer.github-app :as gh])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]
+           [java.security KeyPairGenerator Signature KeyFactory]
+           [java.security.spec X509EncodedKeySpec]))
+
+(defn- tmp-home []
+  (str (Files/createTempDirectory "kagi-broker" (make-array FileAttribute 0))))
+
+(def rsa (let [g (KeyPairGenerator/getInstance "RSA")] (.initialize g 2048) (.generateKeyPair g)))
+
+(defn- pkcs8-pem [kp]
+  (str "-----BEGIN PRIVATE KEY-----\n"
+       (kbytes/base64-encode (vec (.getEncoded (.getPrivate kp))))
+       "\n-----END PRIVATE KEY-----\n"))
+
+(def app-item
+  {:item/category :issuer :item/title "github-app: kotoba-fleet" :issuer/kind :github-app
+   :issuer/public {:app-id 4242 :slug "kotoba-fleet"
+                   :installations [{:id 789 :account "cloud-itonami"}]
+                   :permissions {:contents :write :metadata :read :pull_requests :write}}
+   :item/sections [{:section/fields [{:field/id "private-key" :field/type :concealed
+                                      :field/value (pkcs8-pem rsa)}]}]})
+
+(defn- jwt-valid? [jwt]
+  (let [[h b s] (str/split jwt #"\.")
+        sig (doto (Signature/getInstance "SHA256withRSA") (.initVerify (.getPublic rsa))
+              (.update (kbytes/utf8-bytes (str h "." b))))]
+    (.verify sig (kbytes/base64url-decode-bytes s))))
+
+(defn- fake-github [calls]
+  (fn [{:keys [method url headers body] :as req}]
+    (swap! calls conj req)
+    (cond
+      (str/ends-with? url "/access_tokens")
+      (if (jwt-valid? (subs (get headers "Authorization") 7))
+        {:status 201 :body "{\"token\":\"ghs_FAKE_TOKEN_123\",\"expires_at\":\"2026-10-13T10:00:00Z\"}"}
+        {:status 401 :body "{\"message\":\"bad jwt\"}"})
+      (str/ends-with? url "/installation/token") {:status 204 :body ""}
+      :else {:status 404 :body "{}"})))
+
+(defn- principal [p label]
+  (let [id (identity/generate-identity p)]
+    [id #:agent{:id (str label "-id") :label label :did (:did id) :kem-pub (:kem-public id)}]))
+
+(defn- request [did access resources]
+  {:request/id (str "req-" (rand-int 1000000)) :request/principal did
+   :request/capability {:capability/provider :github :capability/access access
+                        :capability/resources resources}
+   :request/ttl-sec 3600 :request/purpose "hermes-cron:physai-isic-0111"})
+
+(def policy
+  {:policy/principal "node@joseph" :policy/issuer :github-app
+   :policy/allow [{:capability {:capability/provider :github
+                                :capability/access {:contents :read :metadata :read}
+                                :capability/resources ["cloud-itonami/*"]}}]
+   :policy/approve [{:capability {:capability/provider :github
+                                  :capability/access {:contents :write :pull_requests :write}
+                                  :capability/resources ["cloud-itonami/*"]}
+                     :by :passkey}]})
+
+(deftest seal-roundtrip
+  (let [p (crypto/jvm-provider)
+        [id prin] (principal p "node@joseph")
+        [other _] (principal p "node@zebulun")
+        env (seal/seal p {:lease-id "lease-1" :did (:did id) :kem-pub (:agent/kem-pub prin)} "secret-value")]
+    (is (= "secret-value" (seal/open p (identity/kem-secret id) (:did id) env)))
+    (is (not (str/includes? (pr-str env) "secret-value")) "the envelope never shows the value")
+    (testing "another principal's key, or a relabelled envelope, opens nothing"
+      (is (thrown? Exception (seal/open p (identity/kem-secret other) (:did id) env)))
+      (is (thrown? Exception (seal/open p (identity/kem-secret id) (:did id) (assoc env :seal/lease-id "lease-2")))))))
+
+(deftest jwt-and-token-body
+  (is (jwt-valid? (gh/jwt 4242 (pkcs8-pem rsa) 1791600000)))
+  (is (= {:permissions {"contents" "read"} :repositories ["a" "b"]}
+         (gh/token-body {:capability/access {:contents :read}
+                         :capability/resources ["cloud-itonami/a" "cloud-itonami/b"]})))
+  (is (= {:permissions {"contents" "read"}}
+         (gh/token-body {:capability/access {:contents :read} :capability/resources ["cloud-itonami/*"]}))
+      "account-wide: no repository list")
+  (is (= :one-account-per-token
+         (:error (gh/installation-of app-item {:capability/resources ["cloud-itonami/a" "kotoba-lang/b"]}))))
+  (testing "a PKCS#1 key (what GitHub hands out) is accepted"
+    (let [pkcs8 (.getEncoded (.getPrivate rsa))
+          ;; PKCS#8 = SEQ{INT 0, SEQ{rsaEncryption, NULL}, OCTET STRING{pkcs1}}: the pkcs1 body is the tail
+          pkcs1 (java.util.Arrays/copyOfRange pkcs8 26 (alength pkcs8))]
+      (is (= (vec pkcs8) (vec (gh/pkcs1->pkcs8 pkcs1)))))))
+
+(deftest mint-allow-approve-deny-revoke
+  (let [p (crypto/jvm-provider)
+        home (tmp-home)
+        calls (atom [])
+        [agent-id prin] (principal p "node@joseph")
+        owner-id (identity/generate-identity p)
+        owner {:did (:did owner-id) :kem-pub (:kem-public owner-id) :kem-secret (identity/kem-secret owner-id)}
+        ctx {:home home :provider p :principal prin :owner owner :issuer (constantly app-item)
+             :http (fake-github calls) :now 1791600000}]
+    (broker/set-policies! home [policy])
+    (testing "inside allow: issued, sealed to the requester"
+      (let [r (broker/mint! (assoc ctx :request (request (:did agent-id) {:contents :read} ["cloud-itonami/cloud-itonami-isic-0111"])))]
+        (is (= :issued (:status r)))
+        (is (= "ghs_FAKE_TOKEN_123" (seal/open p (identity/kem-secret agent-id) (:did agent-id) (:envelope r))))
+        (is (= {"permissions" {"contents" "read"} "repositories" ["cloud-itonami-isic-0111"]}
+               ((requiring-resolve 'json.data-json/read-str) (:body (first @calls)))))
+        (is (= 1791603600 (get-in r [:lease :lease/expires-at])))
+        (testing "revocation reaches GitHub with the owner's copy"
+          (is (= {:status :revoked :lease-id (get-in r [:lease :lease/id]) :at-github true}
+                 (broker/revoke! ctx (get-in r [:lease :lease/id]))))
+          (is (= "token ghs_FAKE_TOKEN_123" (get-in (last @calls) [:headers "Authorization"])))
+          (is (= :revoked (:lease/state (get (broker/leases home 1791600100) (get-in r [:lease :lease/id]))))))))
+    (testing "writes wait for the owner, then issue on approval"
+      (let [req (request (:did agent-id) {:contents :write} ["cloud-itonami/x"])
+            r (broker/mint! (assoc ctx :request req))]
+        (is (= {:status :pending :request-id (:request/id req) :by :passkey} r))
+        (is (= 1 (count (broker/pending home))))
+        (let [a (broker/approve! (assoc ctx :approver "did:key:owner") (:request/id req) (constantly prin))]
+          (is (= :issued (:status a)))
+          (is (= "did:key:owner" (get-in a [:lease :lease/approval :approver])))
+          (is (empty? (broker/pending home))))))
+    (testing "outside every rule: refused with what to narrow"
+      (let [r (broker/mint! (assoc ctx :request (request (:did agent-id) {:contents :read} ["kotoba-lang/kagi"])))]
+        (is (= :denied (:status r)))
+        (is (= "kotoba-lang/kagi" (:wanted (first (:reasons r)))))))
+    (testing "a principal cannot ask on someone else's behalf"
+      (is (= [:request/principal-mismatch]
+             (:errors (broker/mint! (assoc ctx :request (request "did:key:zSomeoneElse" {:contents :read} ["cloud-itonami/a"])))))))
+    (testing "the ledger holds leases, not values, and detects tampering"
+      (let [entries (broker/ledger home)]
+        (is (broker/verify-ledger entries))
+        (is (not (str/includes? (pr-str entries) "ghs_FAKE_TOKEN_123")))
+        (is (not (broker/verify-ledger (assoc-in entries [0 :at] 1))))))))
+
+(deftest manifest-flow-pieces
+  (let [m (gh/manifest {:name "kagi-broker-x" :redirect-url "http://127.0.0.1:8977/callback"})]
+    (is (= {"contents" "read" "metadata" "read" "pull_requests" "write"} (:default_permissions m)))
+    (is (false? (get-in m [:hook_attributes :active])) "no webhook: the App only mints tokens")
+    (is (= "https://github.com/organizations/cloud-itonami/settings/apps/new?state=s1"
+           (gh/create-url {:org "cloud-itonami" :state "s1"})))
+    (let [page ((requiring-resolve 'kagi.broker-cli/setup-page) "{\"name\":\"a<b\"}" "https://github.com/settings/apps/new?state=s")]
+      (is (str/includes? page "method=post"))
+      (is (str/includes? page "&quot;name&quot;:&quot;a&lt;b&quot;") "the manifest is escaped into the form"))
+    (let [item (gh/conversion->issuer {:id 7 :slug "kagi-broker-x" :pem "PEM" :owner {:login "jun784"}
+                                       :permissions {:contents "read" :metadata "read"}}
+                                      [{:id 9 :account "cloud-itonami"}])]
+      (is ((requiring-resolve 'kagitaba.issuer/issuer?) item))
+      (is (= "PEM" (gh/private-key-pem item)))
+      (is (not (str/includes? (pr-str (:issuer/public item)) "PEM")) "the public part holds no key"))))

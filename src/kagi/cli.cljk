@@ -41,6 +41,9 @@
             [kagi.agent-protocol :as agent-proto]
             [kagi.agent-service :as agent-service]
             [kagi.secret-store :as secret-store]
+            [kagi.broker-cli :as broker-cli]
+            [kagi.mcp :as mcp]
+            [kagi.broker :as broker]
             [kagi.local-edn :as local-edn]
             [kagi.clipboard :as clipboard]
             [kagi.autofill :as autofill]
@@ -1256,6 +1259,24 @@ KAGI_IDENTITY_STORE=keychain で新規 identity 秘密鍵を Apple Keychain に�
                      "verify" (cmd-recovery-verify args)
                      "get" (cmd-recovery-get p id args)
                      (die "usage: kagi recovery create|verify|get ..."))
+        "issuer" (let [store-item! (fn [name comp text]
+                                     (with-vault p
+                                       (fn [st vmk]
+                                         (run-op! p id st vmk {:op :item/create :item-id name :compartment comp
+                                                               :plaintext (kbytes/utf8-bytes text)}
+                                                  :credential-broker-issuer))))]
+                   (case (second args)
+                     "setup" (if (= "github" (nth args 2 nil))
+                               (broker-cli/issuer-setup store-item! args)
+                               (die "usage: kagi issuer setup github [--org ORG] [--name NAME]"))
+                     "refresh" (broker-cli/issuer-refresh store-item! args)
+                     "ls" (println (pr-str (broker/issuers dir)))
+                     (die "usage: kagi issuer setup github|refresh|ls")))
+        "policy" (broker-cli/policy-cmd args)
+        "lease"  (broker-cli/lease-cmd args)
+        "mcp"    (mcp/serve args)
+        "git-credential" (broker-cli/git-credential args)
+        "exec"   (broker-cli/exec-cmd args)
         "push"   (cmd-push id args)
         "pull"   (cmd-pull id args)
         "sync"   (cmd-sync id args)

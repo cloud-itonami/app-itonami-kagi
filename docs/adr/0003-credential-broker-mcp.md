@@ -1,6 +1,6 @@
 # ADR-0003: credential broker と MCP — 人がトークンを作らない
 
-**Status**: proposed · **Date**: 2026-10-10 · **Deciders**: Jun Kawasaki
+**Status**: accepted (段階 1〜4 実装 2026-10-13) · **Date**: 2026-10-10 · **Deciders**: Jun Kawasaki
 
 データの形（issuer / credential request / lease）は kagitaba ADR-0002 が持つ。
 本書は kagi 側の振る舞い: 発行（mint）、方針（policy）、承認、MCP 面、消費。
@@ -164,3 +164,16 @@ minter へ届き、封入物が返る。
 - **持ち主の個人トークンを配る**: 権限過大（`delete_repo` `workflow`）、取り消し不能。
 - **MCP ツールが平文を返す**: モデルの文脈・ログ・transcript に値が残る。
 - **minter を 1 台に固定**: そのノードの停止で全ノードの発行が止まる。
+
+## 実装メモ（2026-10-13）
+
+- 段階 1: kagitaba `capability` `lease` `policy` `issuer`（kagitaba ADR-0002）。
+- 段階 2: `kagi.issuer.github-app`（manifest flow、RS256 JWT、PKCS#1→PKCS#8、
+  installation token、失効）、`kagi.lease-seal`（要求者 KEM への封入、AAD に lease id と did）、
+  `kagi.broker`（mint / pending / approve / revoke、hash 連鎖台帳）。
+- 段階 3: `kagi mcp`（stdio JSON-RPC）。mcp-clj kernel は使わず最小の dispatcher を
+  内蔵した（依存を増やさないため。tool の形は本書の表のとおり）。
+- 段階 4: `kagi git-credential`、`kagi exec`、`kagi lease request/open`（期限まで再利用）、
+  ノードからの要求は `kagi lease serve` が agent の署名（ML-DSA+Ed25519、5 分以内）で受ける。
+  gateway-hy は secrets.command helper で lease を開き、期限前に上流キャッシュを捨てる。
+- 未実装: passkey での承認（いまは持ち主が `kagi lease approve` を打つ）、minter の複数化。

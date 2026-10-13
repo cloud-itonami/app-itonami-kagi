@@ -366,6 +366,35 @@ nbb/ブラウザ(`@noble/*`) で**同じ実装**を通る（両方向の interop
 `kagi.agent/signer` は `kagi.chain-signer` を agent session に繋いだもので、
 署名鍵の item を governor 経由で毎回開き、公開鍵と署名だけを返す（seed は返さない）。
 
+## credential broker（ADR-0003）
+
+人がトークンを作らず、agent が短命・範囲限定の資格情報を頼む経路。
+
+```bash
+# 持ち主（vault のある機械）: 1 回だけ。ページで Continue → Create GitHub App → Install
+bin/kagi issuer setup github [--org cloud-itonami]
+bin/kagi policy set fleet-policy.edn         # {:policies [kagitaba.policy …]}
+bin/kagi lease serve --host 100.x.y.z        # ノードからの署名つき要求を受ける
+bin/kagi lease pending | approve <req> | ls | revoke <lease>
+
+# agent（登録済み principal）
+bin/kagi lease request --from http://…:8978/v1/lease --access contents:read \
+    --resources cloud-itonami/cloud-itonami-isic-0111 --purpose "git:…"
+bin/kagi lease open --lease <id>             # 値を stdout へ（実行プロセス専用）
+bin/kagi exec --access contents:read --resources org/* --purpose ci -- gh api …
+git config --global credential.helper "!kagi git-credential"   # + credential.useHttpPath true
+
+# MCP（Claude / Hermes から）: 値は返さず handle だけ
+bin/kagi mcp --agent <id|label>
+```
+
+- 発行物は GitHub App installation token（≤1 時間、repo と権限を要求の範囲へ絞る）。
+  要求者の KEM 公開鍵へ封入して返し（`kagi.lease-seal`）、broker は平文を持たない。
+- 判定は `kagitaba.policy`: allow は自動発行、approve は `kagi lease approve` 待ち、
+  それ以外は拒否理由つき。`$KAGI_HOME/broker/leases.edn` は hash 連鎖の台帳で、
+  lease 記録だけを持ち値は持たない。
+- 取り消し（`kagi lease revoke`）は持ち主用の封入コピーで GitHub 側でも失効させる。
+
 ## ローカルの窓（`kagi ui`）
 
 1Password の一覧画面にあたるものを、**この端末の 127.0.0.1 にだけ**開く。

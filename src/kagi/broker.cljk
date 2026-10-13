@@ -1,0 +1,195 @@
+(ns kagi.broker
+  "Credential broker (ADR-0003): requests in, short-lived sealed leases out.
+
+  State under `$KAGI_HOME/broker/` — none of it secret:
+
+    policy.edn         {:policies [kagitaba.policy …]}       owner-written
+    issuers.edn        {\"github-app: <slug>\" <:issuer/public>} for listing without unlock
+    leases.edn         append-only, hash-chained events (issued / pending / denied /
+                       approved / revoked); every lease record, never a value
+    sealed/<id>.edn    the requester's envelope (only its key opens it)
+    sealed/<id>.owner.edn  the owner's copy, so the owner can revoke at GitHub
+    pending/<req>.edn  requests waiting for the owner's approval
+
+  `mint!` decides with `kagitaba.policy`, mints through the issuer, seals the
+  value to the requester (and to the owner), records the lease and returns
+  the envelope. The broker keeps no plaintext: the token exists in memory only
+  between the issuer's response and the two seals.
+
+  Everything that touches the world comes in as an argument (`:http`, `:now`,
+  `:issuer` — a thunk that opens the issuer item), so the flow is tested end to
+  end against fakes."
+  (:require [kotoba.lang.text :as str]
+            [kotoba.bytes :as kbytes]
+            [kagitaba.lease :as klease]
+            [kagitaba.policy :as kpolicy]
+            [kagitaba.issuer :as kissuer]
+            [kagi.crypto :as crypto]
+            #?(:clj [kagi.local-edn :as local-edn])
+            [kagi.lease-seal :as seal]
+            [kagi.issuer.github-app :as gh])
+  #?(:clj (:import [java.io File]
+                   [java.util UUID])))
+
+#?(:clj (defn- file ^File [& parts] (File. ^String (str/join "/" parts))))
+
+(defn- edn-str
+  "pr-str without `#:ns{}` map syntax, which the EDN reader here does not read."
+  [v]
+  (binding [*print-namespace-maps* false] (pr-str v)))
+
+(defn broker-dir [home] (str home "/broker"))
+
+#?(:clj
+   (defn- read-edn [path default]
+     (let [f (file path)]
+       (if (.exists f) (local-edn/read-file (str f)) default))))
+
+#?(:clj
+   (defn- write-edn! [path value]
+     (let [f (file path)
+           tmp (file (str path ".tmp"))]
+       (.mkdirs (.getParentFile f))
+       (spit tmp (edn-str value))
+       (.renameTo tmp f))))
+
+#?(:clj (defn policies [home] (:policies (read-edn (str (broker-dir home) "/policy.edn") {:policies []}))))
+#?(:clj (defn set-policies! [home ps] (write-edn! (str (broker-dir home) "/policy.edn") {:policies (vec ps)})))
+#?(:clj (defn issuers [home] (read-edn (str (broker-dir home) "/issuers.edn") {})))
+#?(:clj (defn note-issuer! [home title public]
+          (write-edn! (str (broker-dir home) "/issuers.edn") (assoc (issuers home) title public))))
+
+;; ── ledger: append-only, hash-chained ────────────────────────────────────
+
+#?(:clj
+   (defn- entry-hash [entry]
+     (kbytes/hex (vec (crypto/sha256 (kbytes/utf8-bytes (edn-str (dissoc entry :hash))))))))
+
+#?(:clj
+   (defn ledger [home]
+     (let [f (file (broker-dir home) "leases.edn")]
+       (if (.exists f)
+         (mapv local-edn/read-text (remove str/blank? (str/split-lines (slurp f))))
+         []))))
+
+#?(:clj
+   (defn verify-ledger
+     "true when every entry's hash matches and chains to the previous one."
+     [entries]
+     (loop [prev nil [e & more] entries]
+       (cond (nil? e) true
+             (or (not= prev (:prev e)) (not= (:hash e) (entry-hash e))) false
+             :else (recur (:hash e) more)))))
+
+#?(:clj
+   (defn- append! [home event]
+     (locking broker-dir
+       (let [entries (ledger home)
+             e (assoc event :seq (count entries) :prev (:hash (peek entries)))
+             e (assoc e :hash (entry-hash e))
+             f (file (broker-dir home) "leases.edn")]
+         (.mkdirs (.getParentFile f))
+         (spit f (str (edn-str e) "\n") :append true)
+         e))))
+
+#?(:clj
+   (defn leases
+     "lease-id → lease (latest record), state derived at `now-sec`."
+     [home now-sec]
+     (reduce (fn [m {:keys [event lease lease-id at]}]
+               (case event
+                 :issued (assoc m (:lease/id lease) lease)
+                 :revoked (update m lease-id klease/revoke at)
+                 m))
+             {} (ledger home))))
+
+;; ── mint ─────────────────────────────────────────────────────────────────
+
+(defn principal-ids [principal]
+  (set (remove nil? [(:agent/did principal) (:agent/label principal) (:agent/id principal)])))
+
+#?(:clj
+   (defn- sealed-path [home lease-id & [owner?]]
+     (str (broker-dir home) "/sealed/" lease-id (when owner? ".owner") ".edn")))
+
+#?(:clj
+   (defn- issue!
+     [{:keys [home provider principal owner request issuer http now decision]}]
+     (let [item (issuer)
+           capability (:request/capability request)]
+       (if-not (kissuer/can-issue? item capability)
+         (do (append! home {:event :denied :at now :request request
+                            :reasons [{:reason :issuer-ceiling :issuer (:item/title item)}]})
+             {:status :denied :reasons [{:reason :issuer-ceiling :issuer (:item/title item)}]})
+         (let [lease-id (str "lease-" (UUID/randomUUID))
+               {:keys [token]} (gh/mint http item capability now)
+               lease (klease/lease {:id lease-id :request request :issuer (:item/title item)
+                                    :issued-at now :ttl-sec klease/max-ttl-sec
+                                    :approval (select-keys decision [:decision :rule :by :approver])})
+               env (seal/seal provider {:lease-id lease-id :did (:agent/did principal)
+                                        :kem-pub (:agent/kem-pub principal)} token)]
+           (write-edn! (sealed-path home lease-id) env)
+           (when (:kem-pub owner)
+             (write-edn! (sealed-path home lease-id true)
+                         (seal/seal provider {:lease-id lease-id :did (:did owner)
+                                              :kem-pub (:kem-pub owner)} token)))
+           (append! home {:event :issued :at now :lease lease})
+           {:status :issued :lease lease :envelope env})))))
+
+#?(:clj
+   (defn mint!
+     "Decide and, when allowed, issue. Returns one of
+       {:status :issued :lease … :envelope …}
+       {:status :pending :request-id …}      ; the owner must approve
+       {:status :denied :reasons […]}
+       {:status :invalid :errors […]}"
+     [{:keys [home principal request now] :as ctx}]
+     (let [errors (klease/request-errors request)]
+       (cond
+         (seq errors) {:status :invalid :errors errors}
+         (not= (:request/principal request) (:agent/did principal))
+         {:status :invalid :errors [:request/principal-mismatch]}
+         :else
+         (let [d (kpolicy/decide-in (policies home) (principal-ids principal) :github-app request)]
+           (case (:decision d)
+             :allow (issue! (assoc ctx :decision d))
+             :approve (do (write-edn! (str (broker-dir home) "/pending/" (:request/id request) ".edn")
+                                      {:request request :principal (:agent/id principal) :decision d :at now})
+                          (append! home {:event :pending :at now :request request :decision d})
+                          {:status :pending :request-id (:request/id request) :by (:by d)})
+             (do (append! home {:event :denied :at now :request request :reasons (:reasons d)})
+                 {:status :denied :reasons (:reasons d)})))))))
+
+#?(:clj
+   (defn pending [home]
+     (let [dir (file (broker-dir home) "pending")]
+       (vec (for [f (sort (or (.listFiles dir) [])) :when (str/ends-with? (.getName ^File f) ".edn")]
+              (local-edn/read-file (str f)))))))
+
+#?(:clj
+   (defn approve!
+     "The owner approves a pending request (typing the command IS the consent,
+     as with `kagi agent grant`). `principal-of` resolves the stored agent id."
+     [{:keys [home now approver] :as ctx} request-id principal-of]
+     (let [path (str (broker-dir home) "/pending/" request-id ".edn")
+           {:keys [request principal decision] :as p} (read-edn path nil)]
+       (if-not p
+         {:status :absent :request-id request-id}
+         (let [d (assoc decision :approver approver :approved-at now)]
+           (append! home {:event :approved :at now :request-id request-id :approver approver})
+           (.delete (file path))
+           (issue! (assoc ctx :principal (principal-of principal) :request request :decision d)))))))
+
+#?(:clj
+   (defn revoke!
+     "Kill a lease at GitHub (with the owner's sealed copy) and record it."
+     [{:keys [home provider owner http now]} lease-id]
+     (let [env (read-edn (sealed-path home lease-id true) nil)]
+       (when env
+         (gh/revoke http (seal/open provider (:kem-secret owner) (:did owner) env)))
+       (append! home {:event :revoked :at now :lease-id lease-id :at-github (boolean env)})
+       (doseq [owner? [false true]] (.delete (file (sealed-path home lease-id owner?))))
+       {:status :revoked :lease-id lease-id :at-github (boolean env)})))
+
+#?(:clj
+   (defn envelope [home lease-id] (read-edn (sealed-path home lease-id) nil)))

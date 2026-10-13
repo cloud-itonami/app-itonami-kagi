@@ -1,0 +1,404 @@
+(ns kagi.broker-cli
+  "CLI and network faces of the credential broker (ADR-0003).
+
+  Owner side (the machine holding the vault):
+    kagi issuer setup github [--org ORG] [--name NAME] [--port 8977] [--wait 600]
+    kagi issuer refresh <title> | kagi issuer ls
+    kagi policy set <file.edn> | kagi policy show
+    kagi lease mint --agent <id|label> --access contents:read[,metadata:read]
+                    --resources org/repo[,org/*] [--ttl 3600] --purpose <why>
+    kagi lease pending | approve <request-id> | ls | revoke <lease-id>
+    kagi lease serve [--host 127.0.0.1] [--port 8978]   (signed requests from nodes)
+
+  Agent side (any enrolled principal):
+    kagi lease request --from URL --access … --resources … --purpose …   (→ envelope file)
+    kagi lease open (--lease <id> | --envelope FILE)                       (→ value on stdout)
+
+  Values are printed only by `lease open`, whose stdout belongs to the process
+  that asked (a git credential helper, `kagi exec`), never to a model."
+  (:require [kotoba.lang.text :as str]
+            [kotoba.bytes :as kbytes]
+            [kagitaba.lease :as klease]
+            [kagi.agent :as agent]
+            [kagi.agent-registry :as registry]
+            [kagi.broker :as broker]
+            [kagi.crypto :as crypto]
+            [kagi.identity :as identity]
+            [kagi.lease-seal :as seal]
+            [kagi.local-edn :as local-edn]
+            [kagi.vault-read :as vault-read]
+            [kagi.issuer.github-app :as gh])
+  (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
+           [java.net InetSocketAddress URLDecoder]
+           [java.nio.charset StandardCharsets]
+           [java.time Instant]
+           [java.util UUID]
+           [java.util.concurrent CountDownLatch TimeUnit]))
+
+(defn- die [& msg] (binding [*out* *err*] (apply println msg)) (System/exit 1))
+(defn- arg-val [args flag] (->> args (drop-while #(not= flag %)) second))
+(defn- now-sec [] (.getEpochSecond (Instant/now)))
+(defn- edn-str [v] (binding [*print-namespace-maps* false] (pr-str v)))
+(defn- home [] (vault-read/vault-home))
+
+(defn parse-access
+  "\"contents:read,metadata:read\" → {:contents :read :metadata :read}"
+  [s]
+  (into {} (for [pair (str/split (or s "") #",") :when (not (str/blank? pair))
+                 :let [[k v] (str/split pair #":")]]
+             [(keyword (str/trim k)) (keyword (str/trim (or v "read")))])))
+
+(defn request-from
+  [did {:keys [access resources ttl purpose provider]}]
+  {:request/id (str "req-" (UUID/randomUUID))
+   :request/principal did
+   :request/capability {:capability/provider (keyword (or provider "github"))
+                        :capability/access (if (map? access) access (parse-access access))
+                        :capability/resources (if (string? resources)
+                                                (vec (remove str/blank? (str/split resources #",")))
+                                                (vec resources))}
+   :request/ttl-sec (or ttl klease/max-ttl-sec)
+   :request/purpose purpose})
+
+(defn- args->opts [args]
+  {:access (arg-val args "--access") :resources (arg-val args "--resources")
+   :ttl (some-> (arg-val args "--ttl") parse-long) :purpose (arg-val args "--purpose")
+   :provider (arg-val args "--provider")})
+
+;; ── owner context ─────────────────────────────────────────────────────────
+
+(defn owner-session []
+  (let [s (vault-read/open (home))]
+    (when-not (= :open (:status s))
+      (die (str "vault is " (name (:status s)) " — the broker needs the owner's unlocked vault")))
+    s))
+
+(defn principal-of
+  "Registry principal by id, label or did."
+  [h who]
+  (let [reg (agent/load-registry h)]
+    (or (registry/principal reg who)
+        (first (filter #(#{(:agent/label %) (:agent/did %)} who) (:agent/registry reg))))))
+
+(defn- issuer-item [session title]
+  (or (some-> (vault-read/reveal session title "credential-broker:mint") local-edn/read-text)
+      (throw (ex-info "issuer item not readable" {:issuer title}))))
+
+(defn- the-issuer [h]
+  (let [is (broker/issuers h)]
+    (case (count is)
+      0 (die "no issuer — run: kagi issuer setup github")
+      1 (key (first is))
+      (die (str "several issuers; name one with --issuer: " (pr-str (keys is)))))))
+
+(defn owner-ctx [session & [issuer-title]]
+  (let [h (:vault-home session)
+        id (:identity session)
+        title (or issuer-title (the-issuer h))]
+    {:home h :provider (:provider session) :now (now-sec) :http gh/java-http
+     :owner {:did (:did id) :kem-pub (:kem-public id) :kem-secret (identity/kem-secret id)}
+     :issuer (memoize #(issuer-item session title))}))
+
+;; ── issuer setup: the GitHub App Manifest flow over a loopback page ───────
+
+(defn- respond! [^HttpExchange ex status ^String body]
+  (let [bs (.getBytes body StandardCharsets/UTF_8)]
+    (.add (.getResponseHeaders ex) "Content-Type" "text/html; charset=utf-8")
+    (.sendResponseHeaders ex status (alength bs))
+    (with-open [o (.getResponseBody ex)] (.write o bs))))
+
+(defn- query-params [^String q]
+  (into {} (for [kv (str/split (or q "") #"&") :when (str/includes? kv "=")
+                 :let [[k v] (str/split kv #"=" 2)]]
+             [k (URLDecoder/decode ^String v "UTF-8")])))
+
+(defn- html-escape [s]
+  (-> s (str/replace "&" "&amp;") (str/replace "\"" "&quot;") (str/replace "<" "&lt;")))
+
+(defn setup-page
+  "The page that posts the manifest to GitHub (the Manifest flow requires a
+  form POST from the browser)."
+  [manifest-json action]
+  (str "<!doctype html><meta charset=utf-8><title>kagi: GitHub App</title>"
+       "<body style=\"font-family:system-ui;max-width:40rem;margin:3rem auto\">"
+       "<h1>Create the kagi GitHub App</h1>"
+       "<p>GitHub will ask you to confirm the App, then return here. "
+       "kagi stores its key in your vault; you never handle a token.</p>"
+       "<form method=post action=\"" (html-escape action) "\">"
+       "<input type=hidden name=manifest value=\"" (html-escape manifest-json) "\">"
+       "<button style=\"font-size:1.2rem;padding:.6rem 1.2rem\">Continue to GitHub</button></form>"))
+
+(defn- browse! [url]
+  (try (.start (ProcessBuilder. ^java.util.List ["open" url])) (catch Exception _ nil)))
+
+(defn issuer-setup [store-item! args]
+  (let [session (owner-session)
+        h (:vault-home session)
+        port (or (some-> (arg-val args "--port") parse-long) 8977)
+        org (arg-val args "--org")
+        app-name (or (arg-val args "--name") (str "kagi-broker-" (subs (str (UUID/randomUUID)) 0 6)))
+        wait-sec (or (some-> (arg-val args "--wait") parse-long) 600)
+        state (str (UUID/randomUUID))
+        base (str "http://127.0.0.1:" port)
+        manifest-json ((requiring-resolve 'json.data-json/write-str)
+                       (gh/manifest {:name app-name :redirect-url (str base "/callback")}))
+        done (CountDownLatch. 1)
+        result (atom nil)
+        server (HttpServer/create (InetSocketAddress. "127.0.0.1" (int port)) 0)]
+    (.createContext server "/"
+                    (reify HttpHandler
+                      (handle [_ ex]
+                        (let [path (.getPath (.getRequestURI ex))
+                              q (query-params (.getRawQuery (.getRequestURI ex)))]
+                          (cond
+                            (= path "/") (respond! ex 200 (setup-page manifest-json (gh/create-url {:org org :state state})))
+                            (and (= path "/callback") (= state (get q "state")) (get q "code"))
+                            (try
+                              (reset! result (gh/convert-manifest-code gh/java-http (get q "code")))
+                              (respond! ex 200 (str "<p style=\"font-family:system-ui\">Created <b>"
+                                                    (html-escape (:slug @result)) "</b>. Now install it: "
+                                                    "<a href=\"" (gh/install-url (:slug @result)) "\">"
+                                                    (gh/install-url (:slug @result)) "</a></p>"))
+                              (finally (.countDown done)))
+                            :else (respond! ex 400 "<p>unexpected request</p>"))))))
+    (.start server)
+    (println (edn-str {:open base :step "press Continue, then Create GitHub App, then Install"}))
+    (browse! base)
+    (try
+      (when-not (.await done wait-sec TimeUnit/SECONDS) (die "timed out waiting for GitHub"))
+      (finally (.stop server 0)))
+    (let [conv @result
+          _ (browse! (gh/install-url (:slug conv)))
+          _ (println (edn-str {:install (gh/install-url (:slug conv)) :step "choose the accounts to install on"}))
+          installs (loop [left wait-sec]
+                     (let [is (gh/list-installations gh/java-http (:id conv) (:pem conv) (now-sec))]
+                       (if (or (seq is) (<= left 0)) is (do (Thread/sleep 5000) (recur (- left 5))))))
+          item (gh/conversion->issuer conv installs)]
+      (store-item! (:item/title item) "issuers" (edn-str item))
+      (broker/note-issuer! h (:item/title item) (:issuer/public item))
+      (println (edn-str {:ok? true :issuer (:item/title item)
+                         :installations (mapv :account installs)
+                         :next "kagi policy set <file> — say which agents may ask for what"})))))
+
+(defn issuer-refresh [store-item! args]
+  (let [session (owner-session)
+        title (or (second (rest args)) (the-issuer (:vault-home session)))
+        item (issuer-item session title)
+        {:keys [app-id]} (:issuer/public item)
+        installs (gh/list-installations gh/java-http app-id (gh/private-key-pem item) (now-sec))
+        item (assoc-in item [:issuer/public :installations] installs)]
+    (store-item! title "issuers" (edn-str item))
+    (broker/note-issuer! (:vault-home session) title (:issuer/public item))
+    (println (edn-str {:ok? true :issuer title :installations (mapv :account installs)}))))
+
+;; ── policy and leases (owner) ─────────────────────────────────────────────
+
+(defn policy-cmd [args]
+  (case (second args)
+    "set" (let [f (or (nth args 2 nil) (die "usage: kagi policy set <file.edn>"))
+                ps (:policies (local-edn/read-file f))]
+            (when-not (vector? ps) (die "the file must hold {:policies [...]}"))
+            (broker/set-policies! (home) ps)
+            (println (edn-str {:ok? true :policies (count ps)})))
+    "show" (println (edn-str {:policies (broker/policies (home))}))
+    (die "usage: kagi policy set <file.edn> | show")))
+
+(defn- public-result [r]
+  (cond-> (dissoc r :envelope)
+    (:envelope r) (assoc :envelope (str "broker/sealed/" (get-in r [:lease :lease/id]) ".edn"))))
+
+(defn mint-for
+  "Owner-side mint for a registered principal (used by the CLI, `lease serve`
+  and `kagi mcp`)."
+  [session who opts]
+  (let [ctx (owner-ctx session (:issuer opts))
+        prin (or (principal-of (:home ctx) who) (throw (ex-info "unknown principal" {:principal who})))]
+    (broker/mint! (assoc ctx :principal prin :request (request-from (:agent/did prin) opts)))))
+
+(defn lease-owner-cmd [args]
+  (case (second args)
+    "mint" (let [who (or (arg-val args "--agent") (die "--agent is required"))]
+             (println (edn-str (public-result (mint-for (owner-session) who (args->opts args))))))
+    "pending" (println (edn-str (broker/pending (home))))
+    "approve" (let [session (owner-session)
+                    ctx (owner-ctx session)
+                    rid (or (nth args 2 nil) (die "usage: kagi lease approve <request-id>"))]
+                (println (edn-str (public-result
+                                   (broker/approve! (assoc ctx :approver (:did (:identity session))) rid
+                                                    #(principal-of (:home ctx) %))))))
+    "ls" (let [now (now-sec)]
+           (println (edn-str (vec (for [[_ l] (broker/leases (home) now)]
+                                    (assoc l :lease/state (klease/lease-state l now)))))))
+    "revoke" (let [session (owner-session)]
+               (println (edn-str (broker/revoke! (owner-ctx session)
+                                                 (or (nth args 2 nil) (die "usage: kagi lease revoke <lease-id>"))))))))
+
+;; ── lease serve: signed requests from enrolled nodes ──────────────────────
+
+(defn signing-input
+  "What a node signs: the request EDN plus a timestamp, so a captured request
+  cannot be replayed after five minutes."
+  [request-edn ts]
+  (kbytes/utf8-bytes (str "kagi/lease-request/v1|" ts "|" request-edn)))
+
+(defn verify-signed
+  "→ principal or nil. `body` = {:agent-id :ts :request <edn string> :sig <encoded>}."
+  [p h {:keys [agent-id ts request sig]} now]
+  (let [prin (principal-of h agent-id)
+        pub (some-> (:agent/sign-pub prin) identity/decode-bundle)]
+    (when (and prin pub (number? ts) (< (abs (- now ts)) 300)
+               (not (:agent/revoked-at prin))
+               (crypto/verify* p pub (signing-input request ts) (identity/decode-bundle sig)))
+      prin)))
+
+(defn lease-serve [args]
+  (let [session (owner-session)
+        host (or (arg-val args "--host") "127.0.0.1")
+        port (or (some-> (arg-val args "--port") parse-long) 8978)
+        server (HttpServer/create (InetSocketAddress. ^String host (int port)) 0)]
+    (.createContext server "/v1/lease"
+                    (reify HttpHandler
+                      (handle [_ ex]
+                        (let [reply (fn [status v]
+                                      (let [bs (.getBytes ^String (edn-str v) StandardCharsets/UTF_8)]
+                                        (.add (.getResponseHeaders ex) "Content-Type" "application/edn")
+                                        (.sendResponseHeaders ex status (alength bs))
+                                        (with-open [o (.getResponseBody ex)] (.write o bs))))]
+                          (try
+                            (let [body (local-edn/read-text (slurp (.getRequestBody ex)))
+                                  prin (verify-signed (:provider session) (:vault-home session) body (now-sec))]
+                              (if-not prin
+                                (reply 401 {:status :unauthenticated})
+                                (let [req (local-edn/read-text (:request body))
+                                      ctx (owner-ctx session)
+                                      r (broker/mint! (assoc ctx :principal prin :request req))]
+                                  (reply 200 r))))
+                            (catch Exception e
+                              (reply 500 {:status :error :message (ex-message e)})))))))
+    (.start server)
+    (println (edn-str {:serving (str "http://" host ":" port "/v1/lease")}))
+    @(promise)))
+
+;; ── agent side ────────────────────────────────────────────────────────────
+
+(defn agent-session []
+  (let [s (agent/open)]
+    (when-not (= :open (:status s))
+      (die (edn-str (select-keys s [:status :hint :vault-home :agent-id]))))
+    s))
+
+(defn signed-request-body [s request]
+  (let [p (:provider s)
+        ts (now-sec)
+        req-edn (edn-str request)]
+    {:agent-id (:agent-id s) :ts ts :request req-edn
+     :sig (identity/encode-bundle (crypto/sign-with p (identity/sign-secret (:identity s))
+                                                    (signing-input req-edn ts)))}))
+
+(defn request-remote
+  "Ask a broker over HTTP; on issue, keep the envelope under the agent's home."
+  [s url opts]
+  (let [request (request-from (:did s) opts)
+        res (gh/java-http {:method :post :url url :headers {"Content-Type" "application/edn"}
+                           :body (edn-str (signed-request-body s request))})
+        r (local-edn/read-text (:body res))]
+    (when-let [env (:envelope r)]
+      (let [path (str (:vault-home s) "/leases/" (:seal/lease-id env) ".edn")]
+        (.mkdirs (.getParentFile (java.io.File. path)))
+        (spit path (edn-str (assoc env :lease (:lease r))))))
+    (public-result r)))
+
+(defn open-envelope
+  "The value inside an envelope sealed to this agent."
+  [s env]
+  (seal/open (:provider s) (identity/kem-secret (:identity s)) (:did s) env))
+
+(defn find-envelope [s {:keys [lease envelope]}]
+  (cond envelope (local-edn/read-file envelope)
+        lease (or (let [f (java.io.File. (str (:vault-home s) "/leases/" lease ".edn"))]
+                    (when (.exists f) (local-edn/read-file (str f))))
+                  (broker/envelope (:vault-home s) lease)
+                  ;; an agent on the owner's own machine: the broker's sealed dir
+                  (some-> (not-empty (System/getenv "KAGI_BROKER_HOME")) (broker/envelope lease)))
+        :else nil))
+
+(defn lease-agent-cmd [args]
+  (case (second args)
+    "request" (let [s (agent-session)]
+                (println (edn-str (request-remote s (or (arg-val args "--from") (die "--from URL is required"))
+                                                  (args->opts args)))))
+    "open" (let [s (agent-session)
+                 env (or (find-envelope s {:lease (arg-val args "--lease") :envelope (arg-val args "--envelope")})
+                         (die "no such lease envelope"))]
+             (print (open-envelope s env)) (flush))))
+
+;; ── phase 4: consumers ───────────────────────────────────────────────────
+
+(defn broker-url [args]
+  (or (arg-val args "--from") (not-empty (System/getenv "KAGI_BROKER_URL"))
+      (die "no broker: pass --from URL or set KAGI_BROKER_URL")))
+
+(defn cached-lease
+  "An unexpired lease this agent already holds that covers `capability` for at
+  least `margin` more seconds."
+  [s capability now margin]
+  (let [dir (java.io.File. (str (:vault-home s) "/leases"))]
+    (first (for [f (sort-by #(- (.lastModified ^java.io.File %)) (or (.listFiles dir) []))
+                 :let [env (try (local-edn/read-file (str f)) (catch Exception _ nil))
+                       l (:lease env)]
+                 :when (and l (> (- (:lease/expires-at l) now) margin)
+                            (= :active (klease/lease-state l now))
+                            ((requiring-resolve 'kagitaba.capability/covers?) (:lease/capability l) capability))]
+             env))))
+
+(defn obtain!
+  "A value for `opts`: from a cached lease, else a new one from the broker.
+  Returns {:value :lease} or throws with the broker's answer."
+  [s url opts]
+  (let [cap (:request/capability (request-from (:did s) opts))]
+    (if-let [env (cached-lease s cap (now-sec) 300)]
+      {:value (open-envelope s env) :lease (:lease env)}
+      (let [r (request-remote s url opts)]
+        (if (= :issued (:status r))
+          (let [env (find-envelope s {:lease (get-in r [:lease :lease/id])})]
+            {:value (open-envelope s env) :lease (:lease r)})
+          (throw (ex-info "no credential issued" r)))))))
+
+(defn git-credential
+  "git credential helper (`git config credential.helper \"!kagi git-credential\"`,
+  with `credential.useHttpPath true` so git passes the repository). Answers
+  `get` for github.com with a lease for that repository; ignores store/erase."
+  [args]
+  (when (= "get" (second args))
+    (let [kv (into {} (for [line (str/split-lines (slurp *in*)) :when (str/includes? line "=")]
+                        (str/split line #"=" 2)))
+          repo (some-> (get kv "path") (str/replace #"\.git$" ""))]
+      (when (and (= "github.com" (get kv "host")) repo)
+        (let [s (agent-session)
+              access (or (not-empty (System/getenv "KAGI_GIT_ACCESS")) "contents:read")
+              {:keys [value]} (obtain! s (broker-url args)
+                                       {:access access :resources repo
+                                        :purpose (str "git:" repo)})]
+          (println "username=x-access-token")
+          (println (str "password=" value))
+          (flush))))))
+
+(defn exec-cmd
+  "`kagi exec --access … --resources … --purpose … [--from URL] -- cmd args…`:
+  runs cmd with GH_TOKEN set to a lease value, in that child only."
+  [args]
+  (let [[mine cmd] (split-with #(not= "--" %) args)
+        cmd (rest cmd)]
+    (when (empty? cmd) (die "usage: kagi exec --access … --resources … --purpose … -- cmd args…"))
+    (let [s (agent-session)
+          {:keys [value]} (obtain! s (broker-url mine) (args->opts mine))
+          pb (doto (ProcessBuilder. ^java.util.List (vec cmd)) (.inheritIO))]
+      (.put (.environment pb) "GH_TOKEN" value)
+      (System/exit (.waitFor (.start pb))))))
+
+(defn lease-cmd [args]
+  (case (second args)
+    ("mint" "pending" "approve" "ls" "revoke") (lease-owner-cmd args)
+    ("request" "open") (lease-agent-cmd args)
+    "serve" (lease-serve args)
+    (die "usage: kagi lease mint|pending|approve|ls|revoke|serve|request|open ...")))

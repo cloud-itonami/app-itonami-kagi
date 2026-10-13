@@ -1,0 +1,54 @@
+(ns kagi.lease-seal
+  "Seal a minted credential to the requesting principal's KEM public key
+  (ADR-0003 §2).
+
+  The minter encrypts the value with a fresh DEK and encapsulates that DEK to
+  the requester's hybrid (X25519 + ML-KEM-768) public key — the same envelope
+  `:share/grant` uses — and keeps nothing. The lease id and the requester's did
+  are the AEAD's associated data, so an envelope cannot be replayed as another
+  lease or opened as if it were meant for someone else.
+
+  The envelope is plain EDN of base64 strings: it travels over MCP, HTTP or a
+  file and is useless to anyone without the requester's secret key."
+  (:require [kotoba.bytes :as kbytes]
+            [kagi.crypto :as crypto]
+            [kagi.identity :as identity]))
+
+(def ^:const version "kagi/lease-seal/v1")
+
+(defn- aad [lease-id did]
+  (crypto/utf8-bytes (str version "|" lease-id "|" did)))
+
+(defn seal
+  "→ envelope map. `kem-pub` is the principal's encoded KEM bundle as the
+  agent registry stores it (`:agent/kem-pub`)."
+  [p {:keys [lease-id did kem-pub]} ^String plaintext]
+  (let [ad (aad lease-id did)
+        {:keys [dek nonce ciphertext]} (crypto/seal-item p (crypto/utf8-bytes plaintext) ad)]
+    (try
+      (let [share (crypto/share-dek p (identity/decode-bundle kem-pub) dek)]
+        {:seal/version version
+         :seal/lease-id lease-id
+         :seal/did did
+         :seal/kem-ct (identity/encode-bundle (:kem-ct share))
+         :seal/box (identity/encode-bundle {:share-nonce (:nonce share)
+                                            :wrapped (:wrapped share)
+                                            :nonce nonce
+                                            :ciphertext ciphertext})})
+      (finally (crypto/burn! dek)))))
+
+(defn open
+  "Open an envelope with the principal's KEM secret (as `identity/kem-secret`
+  returns it). Throws when the envelope was not sealed to this did/lease."
+  [p kem-secret did envelope]
+  (when (not= version (:seal/version envelope))
+    (throw (ex-info "unknown lease envelope version" {:version (:seal/version envelope)})))
+  (when (not= did (:seal/did envelope))
+    (throw (ex-info "lease envelope is sealed to another principal"
+                    {:sealed-to (:seal/did envelope) :me did})))
+  (let [{:keys [share-nonce wrapped nonce ciphertext]} (identity/decode-bundle (:seal/box envelope))
+        dek (crypto/accept-share p kem-secret {:kem-ct (identity/decode-bundle (:seal/kem-ct envelope))
+                                                :nonce share-nonce :wrapped wrapped})]
+    (try
+      (kbytes/utf8-string ^bytes (crypto/open-item p dek nonce ciphertext (aad (:seal/lease-id envelope) did)))
+      (finally (crypto/burn! dek)))))

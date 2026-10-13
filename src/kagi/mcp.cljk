@@ -1,0 +1,161 @@
+(ns kagi.mcp
+  "`kagi mcp` — the credential broker as an MCP server over stdio (ADR-0003 §4).
+
+  It runs on the owner's machine and speaks for ONE enrolled principal
+  (`--agent <id|label>`): every request it makes is that principal's, decided
+  by the owner's policy. No tool returns a credential's value. `credential_request`
+  returns a handle (the lease id); the value is opened only by a process holding
+  that principal's key (`kagi lease open --lease <id>`, `kagi exec`, the git
+  credential helper), so it never enters the model's context, transcript or logs.
+
+  Protocol: JSON-RPC 2.0, one message per line (MCP stdio transport):
+  `initialize`, `tools/list`, `tools/call`, `ping`; notifications are ignored."
+  (:require [kotoba.lang.text :as str]
+            [kagitaba.lease :as klease]
+            [kagitaba.policy :as kpolicy]
+            [kagi.broker :as broker]
+            [kagi.broker-cli :as bcli])
+  (:import [java.io BufferedReader InputStreamReader]
+           [java.time Instant]))
+
+(def protocol-version "2025-06-18")
+
+(defn- read-json [s] ((requiring-resolve 'json.data-json/read-str) s :key-fn keyword))
+(defn- write-json [v] ((requiring-resolve 'json.data-json/write-str) v))
+(defn- now-sec [] (.getEpochSecond (Instant/now)))
+
+(def ^:private capability-schema
+  {:type "object"
+   :properties {:provider {:type "string" :enum ["github"] :default "github"}
+                :access {:type "object" :description "permission → level (none|read|write|admin), e.g. {\"contents\":\"read\"}"
+                         :additionalProperties {:type "string" :enum ["none" "read" "write" "admin"]}}
+                :resources {:type "array" :items {:type "string"}
+                            :description "owner/repo or owner/* — one account per request"}
+                :ttl_sec {:type "integer" :minimum 60 :maximum 3600 :default 3600}
+                :purpose {:type "string" :description "why; recorded in the audit ledger"}}
+   :required ["access" "resources" "purpose"]})
+
+(def tools
+  [{:name "credential_request"
+    :description "Ask the owner's broker for a short-lived, scoped credential. Returns a lease handle (never the value): open it with `kagi lease open --lease <id>` or use `kagi exec`. Outside policy it is pending (the owner approves) or denied with reasons to narrow the request."
+    :inputSchema capability-schema}
+   {:name "credential_status"
+    :description "State of a lease: active, expired or revoked, with its scope and expiry."
+    :inputSchema {:type "object" :properties {:lease_id {:type "string"}} :required ["lease_id"]}}
+   {:name "credential_revoke"
+    :description "Revoke a lease now (at GitHub too)."
+    :inputSchema {:type "object" :properties {:lease_id {:type "string"}} :required ["lease_id"]}}
+   {:name "policy_explain"
+    :description "Dry run: would this request be allowed, need approval, or be denied — and by which rule or why. Mints nothing."
+    :inputSchema capability-schema}
+   {:name "issuers_list"
+    :description "Configured issuers (public part only): App, installations, permission ceiling."
+    :inputSchema {:type "object" :properties {}}}
+   {:name "issuer_setup"
+    :description "How to create the GitHub App issuer: the owner runs one command and presses Create and Install; no token is handled."
+    :inputSchema {:type "object" :properties {:org {:type "string"}}}}
+   {:name "audit_tail"
+    :description "The last entries of the broker's hash-chained ledger (leases, approvals, denials; never values)."
+    :inputSchema {:type "object" :properties {:n {:type "integer" :default 20}}}}])
+
+(defn- opts-of [args]
+  {:access (into {} (for [[k v] (:access args)] [(keyword (name k)) (keyword v)]))
+   :resources (vec (:resources args))
+   :ttl (:ttl_sec args)
+   :purpose (:purpose args)
+   :provider (:provider args)})
+
+(defn- lease-view [l now]
+  (when l
+    {:lease_id (:lease/id l) :state (name (klease/lease-state l now))
+     :issuer (:lease/issuer l) :purpose (:lease/purpose l)
+     :access (into {} (for [[k v] (get-in l [:lease/capability :capability/access])] [(name k) (name v)]))
+     :resources (get-in l [:lease/capability :capability/resources])
+     :expires_at (str (Instant/ofEpochSecond (:lease/expires-at l)))
+     :approval (some-> (:lease/approval l) (update-vals #(if (keyword? %) (name %) %)))}))
+
+(defn call-tool
+  "→ a JSON-able map. `env` = {:session :agent :mint :home}; `:mint` is injectable for tests."
+  [{:keys [agent home mint revoke] :as env} tool args]
+  (let [now (now-sec)]
+    (case tool
+      "credential_request"
+      (let [r (mint agent (opts-of args))]
+        (case (:status r)
+          :issued {:status "issued" :lease (lease-view (:lease r) now)
+                   :open (str "kagi lease open --lease " (get-in r [:lease :lease/id]))}
+          :pending {:status "pending" :request_id (:request-id r)
+                    :next (str "the owner approves with: kagi lease approve " (:request-id r))}
+          {:status (name (:status r)) :reasons (or (:reasons r) (:errors r))}))
+
+      "credential_status"
+      {:lease (or (lease-view (get (broker/leases home now) (:lease_id args)) now)
+                  {:state "unknown"})}
+
+      "credential_revoke"
+      (let [r (revoke (:lease_id args))] {:status (name (:status r)) :at_github (:at-github r)})
+
+      "policy_explain"
+      (let [prin (bcli/principal-of home agent)
+            req (bcli/request-from (:agent/did prin) (opts-of args))
+            d (kpolicy/decide-in (broker/policies home) (broker/principal-ids prin) :github-app req)]
+        {:decision (name (:decision d)) :rule (:rule d) :by (some-> (:by d) name) :reasons (:reasons d)})
+
+      "issuers_list"
+      {:issuers (vec (for [[title pub] (broker/issuers home)]
+                       {:title title :app_id (:app-id pub) :installations (mapv :account (:installations pub))
+                        :permissions (into {} (for [[k v] (:permissions pub)] [(name k) (name v)]))}))}
+
+      "issuer_setup"
+      {:run (str "kagi issuer setup github" (when-let [o (:org args)] (str " --org " o)))
+       :what "opens a local page; press Continue, Create GitHub App, then Install on the accounts the fleet needs"}
+
+      "audit_tail"
+      {:entries (vec (take-last (or (:n args) 20)
+                                (map #(select-keys % [:seq :event :at :lease :request-id :reasons :hash])
+                                     (broker/ledger home))))}
+
+      (throw (ex-info (str "unknown tool " tool) {:code -32602})))))
+
+(defn handle
+  "One JSON-RPC message → response map or nil (notifications)."
+  [env {:keys [id method params]}]
+  (let [ok (fn [result] {:jsonrpc "2.0" :id id :result result})
+        err (fn [code msg] {:jsonrpc "2.0" :id id :error {:code code :message msg}})]
+    (when (some? id)
+      (try
+        (case method
+          "initialize" (ok {:protocolVersion protocol-version
+                            :capabilities {:tools {}}
+                            :serverInfo {:name "kagi-credential-broker" :version "0.1.0"}})
+          "ping" (ok {})
+          "tools/list" (ok {:tools tools})
+          "tools/call" (let [r (call-tool env (:name params) (:arguments params {}))]
+                         (ok {:content [{:type "text" :text (write-json r)}]
+                              :structuredContent r
+                              :isError false}))
+          (err -32601 (str "method not found: " method)))
+        (catch Exception e
+          (if (= -32602 (:code (ex-data e)))
+            (err -32602 (ex-message e))
+            ;; a tool failure is a result the model can read, not a protocol error
+            (ok {:content [{:type "text" :text (str "error: " (ex-message e))}] :isError true})))))))
+
+(defn serve
+  "`kagi mcp --agent <id|label>`: stdio loop."
+  [args]
+  (let [agent (or (second (drop-while #(not= "--agent" %) args))
+                  (do (binding [*out* *err*] (println "usage: kagi mcp --agent <id|label>")) (System/exit 1)))
+        session (bcli/owner-session)
+        home (:vault-home session)
+        env {:agent agent :home home
+             :mint (fn [who opts] (bcli/mint-for session who opts))
+             :revoke (fn [lease-id] (broker/revoke! (bcli/owner-ctx session) lease-id))}
+        in (BufferedReader. (InputStreamReader. System/in "UTF-8"))]
+    (loop []
+      (when-let [line (.readLine in)]
+        (when-not (str/blank? line)
+          (when-let [resp (handle env (read-json line))]
+            (println (write-json resp))
+            (flush)))
+        (recur)))))

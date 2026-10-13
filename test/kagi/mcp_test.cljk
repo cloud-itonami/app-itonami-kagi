@@ -1,0 +1,75 @@
+(ns kagi.mcp-test
+  "`kagi mcp` speaks MCP over JSON-RPC and never returns a credential's value;
+  signed lease requests from nodes are accepted only from enrolled keys and
+  only within five minutes."
+  (:require [kotoba.lang.text :as str]
+            [kotoba.test :refer [deftest testing is]]
+            [kagi.mcp :as mcp]
+            [kagi.broker :as broker]
+            [kagi.broker-cli :as bcli]
+            [kagi.crypto :as crypto]
+            [kagi.identity :as identity])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(defn- tmp-home []
+  (str (Files/createTempDirectory "kagi-mcp" (make-array FileAttribute 0))))
+
+(def lease
+  {:lease/id "lease-1" :lease/issuer "github-app: kotoba-fleet" :lease/purpose "git:cloud-itonami/a"
+   :lease/capability {:capability/provider :github :capability/access {:contents :read}
+                      :capability/resources ["cloud-itonami/a"]}
+   :lease/issued-at 1791600000 :lease/expires-at 4102444800 :lease/approval {:decision :allow :rule 0}
+   :lease/state :active})
+
+(deftest protocol
+  (let [env {:agent "claude@workstation" :home (tmp-home)
+             :mint (fn [_ _] {:status :issued :lease lease :envelope {:seal/box "ciphertext"}})
+             :revoke (fn [id] {:status :revoked :lease-id id :at-github true})}
+        init (mcp/handle env {:jsonrpc "2.0" :id 1 :method "initialize" :params {}})
+        listed (mcp/handle env {:jsonrpc "2.0" :id 2 :method "tools/list"})
+        called (mcp/handle env {:jsonrpc "2.0" :id 3 :method "tools/call"
+                                :params {:name "credential_request"
+                                         :arguments {:access {:contents "read"} :resources ["cloud-itonami/a"]
+                                                     :purpose "git:cloud-itonami/a"}}})]
+    (is (= "kagi-credential-broker" (get-in init [:result :serverInfo :name])))
+    (is (= #{"credential_request" "credential_status" "credential_revoke" "policy_explain"
+             "issuers_list" "issuer_setup" "audit_tail"}
+           (set (map :name (get-in listed [:result :tools])))))
+    (is (= "issued" (get-in called [:result :structuredContent :status])))
+    (is (= "kagi lease open --lease lease-1" (get-in called [:result :structuredContent :open])))
+    (testing "the result carries a handle, never the envelope or a value"
+      (is (not (str/includes? (pr-str called) "ciphertext"))))
+    (is (nil? (mcp/handle env {:jsonrpc "2.0" :method "notifications/initialized"})) "notifications get no reply")
+    (is (= -32601 (get-in (mcp/handle env {:jsonrpc "2.0" :id 4 :method "nope"}) [:error :code])))
+    (testing "pending and denied are results the model can act on"
+      (is (= "pending" (get-in (mcp/handle (assoc env :mint (fn [_ _] {:status :pending :request-id "req-9"}))
+                                           {:jsonrpc "2.0" :id 5 :method "tools/call"
+                                            :params {:name "credential_request" :arguments {:access {:contents "write"} :resources ["cloud-itonami/a"] :purpose "p"}}})
+                               [:result :structuredContent :status])))
+      (is (= [{:reason :resource}]
+             (get-in (mcp/handle (assoc env :mint (fn [_ _] {:status :denied :reasons [{:reason :resource}]}))
+                                 {:jsonrpc "2.0" :id 6 :method "tools/call"
+                                  :params {:name "credential_request" :arguments {:access {:contents "read"} :resources ["x/y"] :purpose "p"}}})
+                     [:result :structuredContent :reasons]))))))
+
+(deftest parse-and-request
+  (is (= {:contents :read :pull_requests :write} (bcli/parse-access "contents:read, pull_requests:write")))
+  (let [r (bcli/request-from "did:key:z" {:access "contents:read" :resources "a/b,a/*" :purpose "p"})]
+    (is (= ["a/b" "a/*"] (get-in r [:request/capability :capability/resources])))
+    (is (= 3600 (:request/ttl-sec r)))))
+
+(deftest signed-requests
+  (let [p (crypto/jvm-provider)
+        home (tmp-home)
+        id (identity/generate-identity p)
+        prin #:agent{:id "a1" :label "node@joseph" :did (:did id) :kem-pub (:kem-public id)
+                     :sign-pub {:ed (:public-b64 id) :mldsa (:mldsa-public-b64 id)}}
+        session {:provider p :identity id :did (:did id) :agent-id "a1" :vault-home home}
+        body (with-redefs [kagi.broker-cli/now-sec (constantly 1791600000)]
+               (bcli/signed-request-body session {:request/id "r"}))]
+    (with-redefs [bcli/principal-of (fn [_ who] (when (= who "a1") prin))]
+      (is (= prin (bcli/verify-signed p home body 1791600100)))
+      (is (nil? (bcli/verify-signed p home body 1791600400)) "older than five minutes")
+      (is (nil? (bcli/verify-signed p home (assoc body :request "{:request/id \"other\"}") 1791600100)) "tampered")
+      (is (nil? (bcli/verify-signed p home (assoc body :agent-id "a2") 1791600100)) "unknown principal"))))
