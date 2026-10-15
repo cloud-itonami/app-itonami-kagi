@@ -71,10 +71,11 @@ CLJK_HOOK='(let [parent (.getContextClassLoader (Thread/currentThread))
                    (.getResource parent (str (subs n 0 (- (count n) 5)) ".cljk"))))))]
   (.setContextClassLoader (Thread/currentThread) cl))'
 
-# :dev pins langchain to ../langchain (the west sibling); :cli carries io-storj.
+# Production uses committed Git pins; :dev's ../langchain override is only for
+# development and is unavailable in a focused worktree. :cli carries io-storj.
 # :kagi-jvm comes last, so its main-opts (hook, then -m kagi.cli) win over :cli's.
 HOOK_EDN=${CLJK_HOOK//\\/\\\\}
 HOOK_EDN=${HOOK_EDN//\"/\\\"}
 HOOK_EDN=${HOOK_EDN//$'\n'/ }   # the CLI stores main-opts one per line
 exec clojure -Sdeps "{:aliases {:kagi-jvm {:main-opts [\"-e\" \"$HOOK_EDN\" \"-m\" \"kagi.cli\"]}}}" \
-  -M:dev:cli:kagi-jvm "$@"
+  -M:cli:kagi-jvm "$@"
