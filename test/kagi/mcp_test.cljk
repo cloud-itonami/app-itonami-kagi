@@ -37,7 +37,7 @@
              "issuers_list" "issuer_setup" "audit_tail"}
            (set (map :name (get-in listed [:result :tools])))))
     (is (= "issued" (get-in called [:result :structuredContent :status])))
-    (is (= "kagi lease open --lease lease-1" (get-in called [:result :structuredContent :open])))
+    (is (nil? (get-in called [:result :structuredContent :open])))
     (testing "the result carries a handle, never the envelope or a value"
       (is (not (str/includes? (pr-str called) "ciphertext"))))
     (is (nil? (mcp/handle env {:jsonrpc "2.0" :method "notifications/initialized"})) "notifications get no reply")

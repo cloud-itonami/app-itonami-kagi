@@ -31,6 +31,7 @@
                     HttpResponse$BodyHandlers])))
 
 (def api "https://api.github.com")
+(def token-ttl-sec 3600)
 
 (def default-permissions
   "What fleet profiles need: read code, open pull requests."
@@ -163,8 +164,12 @@
 
 #?(:clj
    (defn list-installations [http app-id pem now-sec]
-     (vec (for [inst (call http :get "/app/installations" (str "Bearer " (jwt app-id pem now-sec)))]
-            {:id (:id inst) :account (get-in inst [:account :login])}))))
+     (let [auth (str "Bearer " (jwt app-id pem now-sec))]
+       (loop [page 1 acc []]
+         (let [batch (call http :get (str "/app/installations?per_page=100&page=" page) auth)
+               acc (into acc (for [inst batch]
+                               {:id (:id inst) :account (get-in inst [:account :login])}))]
+           (if (= 100 (count batch)) (recur (inc page) acc) (vec acc)))))))
 
 (defn token-body
   "The access_tokens request body for a capability inside one installation:

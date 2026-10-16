@@ -31,7 +31,7 @@ agent はそれを **MCP** で頼み、平文はモデルの文脈を通らな�
 ```text
 人（1 回だけ）: GitHub App を 2 クリックで作成・インストール ──▶ issuer（vault 内）
 agent ──MCP──▶ credential_request {github, contents:read, repos, 1h, purpose}
-                     │ policy に合う → 自動発行 / 外れる → 人の承認（passkey 1 タップ）
+                     │ policy に合う → 自動発行 / 外れる → owner が CLI で承認
                      ▼
         minter: issuer の鍵で 1 時間トークンを発行 ──▶ 要求者の KEM 公開鍵へ封入
                      ▼
@@ -93,8 +93,8 @@ principal（ノード / agent）ごとの方針を owner が持つ:
 ```
 
 - **allow に収まる request は自動発行**（人を起こさない）。
-- **approve に当たる request は pending** になり、持ち主の端末へ通知、
-  `kagi ui` か passkey（既存の WebAuthn PRF 経路）で 1 タップ承認。
+- **approve に当たる request は pending** になり、owner が `kagi lease approve <request-id>`
+  を実行して承認する。passkey 承認と通知は未実装であり、承認済み機能として扱わない。
 - **どちらにも当たらなければ拒否**し、理由を返す（agent が範囲を絞り直せる）。
 
 policy 自体は秘密ではないので registry と同じく vault の外（`$KAGI_HOME/policy.edn`）に
@@ -108,7 +108,7 @@ policy 自体は秘密ではないので registry と同じく vault の外（`$
 
 | tool | 入力 | 返り値 |
 |---|---|---|
-| `credential_request` | provider, access（権限）, resources（repo 等）, ttl, purpose | `issued` + lease-id + handle、または `pending` + 承認 URL、または `denied` + 理由 |
+| `credential_request` | provider, access（権限）, resources（repo 等）, ttl, purpose | `issued` + lease-id、または `pending` + request-id、または `denied` + 理由 |
 | `credential_status` | lease-id | 状態・期限・承認者 |
 | `credential_revoke` | lease-id | 失効結果 |
 | `issuer_setup` | provider（`github`） | 人が押す URL と、完了の待ち受け |
@@ -118,9 +118,9 @@ policy 自体は秘密ではないので registry と同じく vault の外（`$
 resources: `kagi://policy/<principal>`, `kagi://leases?active`, `kagi://issuers`。
 
 **handle と平文の分離**: handle は「この lease の封入物」を指す ID。平文を得られるのは
-要求者の秘密鍵を持つ **実行プロセス**だけで（`kagi lease open <handle>` /
-git credential helper / Hermes の secrets.command helper）、それはモデルの
-文脈ではない。モデルが値をログや返答に書く経路を構造的に持たない。
+要求者の秘密鍵を持つ **実行プロセス**だけ（Git credential helper / `kagi exec` /
+Hermes の secrets.command helper）。`kagi lease open` の stdout には値が出るため、
+モデル可視の shell からは実行しない。MCP 応答に値や `lease open` コマンドは返さない。
 
 MCP サーバは agent の秘密鍵を持たない（ADR-2608281100 の `agent serve` と同じく
 「release するだけ」）。複数の minter がある場合、request は mesh 越しに署名つきで
@@ -155,7 +155,7 @@ minter へ届き、封入物が返る。
    `kagi lease`（mint・open・revoke・台帳）、policy 照合。
 3. kagi: `kagi mcp`（上表のツール）。Claude Code / Hermes の MCP 設定に登録。
 4. 消費側: git credential helper、`kagi exec`、gateway-hy の lease 更新。
-5. issuer の追加（Cloudflare、murakumo、AWS STS）。
+5. passkey 承認、minter の複数化、issuer の追加（Cloudflare、murakumo、AWS STS）。
 
 ## 却下した案
 
@@ -176,4 +176,4 @@ minter へ届き、封入物が返る。
 - 段階 4: `kagi git-credential`、`kagi exec`、`kagi lease request/open`（期限まで再利用）、
   ノードからの要求は `kagi lease serve` が agent の署名（ML-DSA+Ed25519、5 分以内）で受ける。
   gateway-hy は secrets.command helper で lease を開き、期限前に上流キャッシュを捨てる。
-- 未実装: passkey での承認（いまは持ち主が `kagi lease approve` を打つ）、minter の複数化。
+- 未実装: passkey での承認（現在は持ち主が `kagi lease approve` を実行）、通知、minter の複数化。

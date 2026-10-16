@@ -4,9 +4,9 @@
   It runs on the owner's machine and speaks for ONE enrolled principal
   (`--agent <id|label>`): every request it makes is that principal's, decided
   by the owner's policy. No tool returns a credential's value. `credential_request`
-  returns a handle (the lease id); the value is opened only by a process holding
-  that principal's key (`kagi lease open --lease <id>`, `kagi exec`, the git
-  credential helper), so it never enters the model's context, transcript or logs.
+  returns a handle (the lease id). Use `kagi exec` or the git credential helper
+  to keep the value inside the child process; never run `kagi lease open` in a
+  model-visible shell because its stdout contains the credential.
 
   Protocol: JSON-RPC 2.0, one message per line (MCP stdio transport):
   `initialize`, `tools/list`, `tools/call`, `ping`; notifications are ignored."
@@ -31,19 +31,22 @@
                          :additionalProperties {:type "string" :enum ["none" "read" "write" "admin"]}}
                 :resources {:type "array" :items {:type "string"}
                             :description "owner/repo or owner/* — one account per request"}
-                :ttl_sec {:type "integer" :minimum 60 :maximum 3600 :default 3600}
+                :request_id {:type "string"
+                             :description "Reuse the request_id returned by a pending response to retrieve the eventual result safely"}
+                :ttl_sec {:type "integer" :minimum 3600 :maximum 3600 :default 3600
+                          :description "GitHub installation tokens have a fixed one-hour lifetime"}
                 :purpose {:type "string" :description "why; recorded in the audit ledger"}}
    :required ["access" "resources" "purpose"]})
 
 (def tools
   [{:name "credential_request"
-    :description "Ask the owner's broker for a short-lived, scoped credential. Returns a lease handle (never the value): open it with `kagi lease open --lease <id>` or use `kagi exec`. Outside policy it is pending (the owner approves) or denied with reasons to narrow the request."
+    :description "Ask the owner's broker for a scoped credential. Returns a lease handle (never the value). Use `kagi exec` or the Git credential helper; do not open the lease in a model-visible shell. GitHub tokens have a fixed one-hour lifetime. Outside policy the request is pending or denied with reasons to narrow it."
     :inputSchema capability-schema}
    {:name "credential_status"
-    :description "State of a lease: active, expired or revoked, with its scope and expiry."
+    :description "State and scope of a lease belonging to the selected principal: active, expired or revoked. Other principals' leases appear unknown."
     :inputSchema {:type "object" :properties {:lease_id {:type "string"}} :required ["lease_id"]}}
    {:name "credential_revoke"
-    :description "Revoke a lease now (at GitHub too)."
+    :description "Revoke one of the selected principal's leases now (at GitHub too)."
     :inputSchema {:type "object" :properties {:lease_id {:type "string"}} :required ["lease_id"]}}
    {:name "policy_explain"
     :description "Dry run: would this request be allowed, need approval, or be denied — and by which rule or why. Mints nothing."
@@ -55,13 +58,14 @@
     :description "How to create the GitHub App issuer: the owner runs one command and presses Create and Install; no token is handled."
     :inputSchema {:type "object" :properties {:org {:type "string"}}}}
    {:name "audit_tail"
-    :description "The last entries of the broker's hash-chained ledger (leases, approvals, denials; never values)."
+    :description "The last entries for the selected principal in the hash-chained ledger (never credential values)."
     :inputSchema {:type "object" :properties {:n {:type "integer" :default 20}}}}])
 
 (defn- opts-of [args]
   {:access (into {} (for [[k v] (:access args)] [(keyword (name k)) (keyword v)]))
    :resources (vec (:resources args))
    :ttl (:ttl_sec args)
+   :request-id (:request_id args)
    :purpose (:purpose args)
    :provider (:provider args)})
 
@@ -82,23 +86,32 @@
       "credential_request"
       (let [r (mint agent (opts-of args))]
         (case (:status r)
-          :issued {:status "issued" :lease (lease-view (:lease r) now)
-                   :open (str "kagi lease open --lease " (get-in r [:lease :lease/id]))}
+          :issued {:status "issued" :lease (lease-view (:lease r) now)}
           :pending {:status "pending" :request_id (:request-id r)
                     :next (str "the owner approves with: kagi lease approve " (:request-id r))}
           {:status (name (:status r)) :reasons (or (:reasons r) (:errors r))}))
 
       "credential_status"
-      {:lease (or (lease-view (get (broker/leases home now) (:lease_id args)) now)
-                  {:state "unknown"})}
+      (let [principal (bcli/principal-of home agent)
+            lease (get (broker/leases home now) (:lease_id args))]
+        {:lease (if (and lease (= (:agent/did principal) (:lease/principal lease)))
+                  (lease-view lease now)
+                  {:state "unknown"})})
 
       "credential_revoke"
-      (let [r (revoke (:lease_id args))] {:status (name (:status r)) :at_github (:at-github r)})
+      (let [principal (bcli/principal-of home agent)
+            lease (get (broker/leases home now) (:lease_id args))]
+        (if (and lease (= (:agent/did principal) (:lease/principal lease)))
+          (let [r (revoke (:lease_id args))]
+            {:status (name (:status r)) :at_github (:at-github r)})
+          {:status "unknown"}))
 
       "policy_explain"
       (let [prin (bcli/principal-of home agent)
             req (bcli/request-from (:agent/did prin) (opts-of args))
-            d (kpolicy/decide-in (broker/policies home) (broker/principal-ids prin) :github-app req)]
+            d (if (= 3600 (:request/ttl-sec req))
+                (kpolicy/decide-in (broker/policies home) (broker/principal-ids prin) :github-app req)
+                {:decision :deny :reasons [{:reason :unsupported-provider-ttl}]})]
         {:decision (name (:decision d)) :rule (:rule d) :by (some-> (:by d) name) :reasons (:reasons d)})
 
       "issuers_list"
@@ -111,9 +124,15 @@
        :what "opens a local page; press Continue, Create GitHub App, then Install on the accounts the fleet needs"}
 
       "audit_tail"
-      {:entries (vec (take-last (or (:n args) 20)
-                                (map #(select-keys % [:seq :event :at :lease :request-id :reasons :hash])
-                                     (broker/ledger home))))}
+      (let [did (:agent/did (bcli/principal-of home agent))
+            n (if (and (integer? (:n args)) (pos? (:n args)))
+                (min 100 (:n args)) 20)
+            own? (fn [entry]
+                   (or (= did (get-in entry [:lease :lease/principal]))
+                       (= did (get-in entry [:request :request/principal]))))]
+        {:entries (vec (take-last n
+                                  (map #(select-keys % [:seq :event :at :lease :request-id :reasons :hash])
+                                       (filter own? (broker/ledger home)))))})
 
       (throw (ex-info (str "unknown tool " tool) {:code -32602})))))
 

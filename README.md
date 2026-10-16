@@ -378,9 +378,9 @@ bin/kagi lease serve --host 100.x.y.z        # ノードからの署名つき要
 bin/kagi lease pending | approve <req> | ls | revoke <lease>
 
 # agent（登録済み principal）
-bin/kagi lease request --from http://…:8978/v1/lease --access contents:read \
+bin/kagi lease request --from http://…:8978/v1/lease [--request-id <id>] --access contents:read \
     --resources cloud-itonami/cloud-itonami-isic-0111 --purpose "git:…"
-bin/kagi lease open --lease <id>             # 値を stdout へ（実行プロセス専用）
+bin/kagi lease open --lease <id>             # 値を stdout へ。model-visible shell では実行しない
 bin/kagi exec --access contents:read --resources org/* --purpose ci -- gh api …
 git config --global credential.helper "!kagi git-credential"   # + credential.useHttpPath true
 
@@ -388,7 +388,7 @@ git config --global credential.helper "!kagi git-credential"   # + credential.us
 bin/kagi mcp --agent <id|label>
 ```
 
-- 発行物は GitHub App installation token（≤1 時間、repo と権限を要求の範囲へ絞る）。
+- 発行物は GitHub App installation token（GitHub 固定の 1 時間、repo と権限を要求の範囲へ絞る）。
   要求者の KEM 公開鍵へ封入して返し（`kagi.lease-seal`）、broker は平文を持たない。
 - 判定は `kagitaba.policy`: allow は自動発行、approve は `kagi lease approve` 待ち、
   それ以外は拒否理由つき。`$KAGI_HOME/broker/leases.edn` は hash 連鎖の台帳で、

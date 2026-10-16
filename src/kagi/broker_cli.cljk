@@ -11,11 +11,11 @@
     kagi lease serve [--host 127.0.0.1] [--port 8978]   (signed requests from nodes)
 
   Agent side (any enrolled principal):
-    kagi lease request --from URL --access … --resources … --purpose …   (→ envelope file)
+    kagi lease request --from URL [--request-id ID] --access … --resources … --purpose …
     kagi lease open (--lease <id> | --envelope FILE)                       (→ value on stdout)
 
-  Values are printed only by `lease open`, whose stdout belongs to the process
-  that asked (a git credential helper, `kagi exec`), never to a model."
+  Never run `lease open` in a model-visible shell: stdout contains the value.
+  Use `kagi exec` or the Git credential helper to keep it in the child process."
   (:require [kotoba.lang.text :as str]
             [kotoba.bytes :as kbytes]
             [kagitaba.lease :as klease]
@@ -29,6 +29,7 @@
             [kagi.vault-read :as vault-read]
             [kagi.issuer.github-app :as gh])
   (:import [com.sun.net.httpserver HttpServer HttpHandler HttpExchange]
+           [java.io ByteArrayOutputStream]
            [java.net InetSocketAddress URLDecoder]
            [java.nio.charset StandardCharsets]
            [java.time Instant]
@@ -49,8 +50,8 @@
              [(keyword (str/trim k)) (keyword (str/trim (or v "read")))])))
 
 (defn request-from
-  [did {:keys [access resources ttl purpose provider]}]
-  {:request/id (str "req-" (UUID/randomUUID))
+  [did {:keys [access resources ttl purpose provider request-id]}]
+  {:request/id (or request-id (str "req-" (UUID/randomUUID)))
    :request/principal did
    :request/capability {:capability/provider (keyword (or provider "github"))
                         :capability/access (if (map? access) access (parse-access access))
@@ -63,7 +64,8 @@
 (defn- args->opts [args]
   {:access (arg-val args "--access") :resources (arg-val args "--resources")
    :ttl (some-> (arg-val args "--ttl") parse-long) :purpose (arg-val args "--purpose")
-   :provider (arg-val args "--provider")})
+   :provider (arg-val args "--provider") :issuer (arg-val args "--issuer")
+   :request-id (arg-val args "--request-id")})
 
 ;; ── owner context ─────────────────────────────────────────────────────────
 
@@ -245,11 +247,35 @@
   "→ principal or nil. `body` = {:agent-id :ts :request <edn string> :sig <encoded>}."
   [p h {:keys [agent-id ts request sig]} now]
   (let [prin (principal-of h agent-id)
-        pub (some-> (:agent/sign-pub prin) identity/decode-bundle)]
+        pub (some-> (:agent/sign-pub prin) identity/decode-bundle)
+        before-expiry? (or (nil? (:agent/not-after prin))
+                           (try (.isBefore (Instant/ofEpochSecond now)
+                                           (Instant/parse (:agent/not-after prin)))
+                                (catch Exception _ false)))]
     (when (and prin pub (number? ts) (< (abs (- now ts)) 300)
+               before-expiry?
                (not (:agent/revoked-at prin))
                (crypto/verify* p pub (signing-input request ts) (identity/decode-bundle sig)))
       prin)))
+
+(def ^:const max-lease-request-bytes 65536)
+
+(defn- read-lease-body [^HttpExchange exchange]
+  (with-open [in (.getRequestBody exchange)
+              out (ByteArrayOutputStream.)]
+    (let [buf (byte-array 4096)]
+      (loop [total 0]
+        (let [n (.read in buf)]
+          (if (neg? n)
+            (try (local-edn/read-text (.toString out "UTF-8"))
+                 (catch Exception e
+                   (throw (ex-info "invalid lease request body" {:http-status 400} e))))
+            (let [next-total (+ total n)]
+              (when (> next-total max-lease-request-bytes)
+                (throw (ex-info "lease request body too large"
+                                {:http-status 413 :max-bytes max-lease-request-bytes})))
+              (.write out buf 0 n)
+              (recur next-total))))))))
 
 (defn lease-serve [args]
   (let [session (owner-session)
@@ -265,7 +291,7 @@
                                         (.sendResponseHeaders ex status (alength bs))
                                         (with-open [o (.getResponseBody ex)] (.write o bs))))]
                           (try
-                            (let [body (local-edn/read-text (slurp (.getRequestBody ex)))
+                            (let [body (read-lease-body ex)
                                   prin (verify-signed (:provider session) (:vault-home session) body (now-sec))]
                               (if-not prin
                                 (reply 401 {:status :unauthenticated})
@@ -274,7 +300,8 @@
                                       r (broker/mint! (assoc ctx :principal prin :request req))]
                                   (reply 200 r))))
                             (catch Exception e
-                              (reply 500 {:status :error :message (ex-message e)})))))))
+                              (reply (or (:http-status (ex-data e)) 500)
+                                     {:status :error :message (ex-message e)})))))))
     (.start server)
     (println (edn-str {:serving (str "http://" host ":" port "/v1/lease")}))
     @(promise)))
@@ -373,7 +400,8 @@
     (let [kv (into {} (for [line (str/split-lines (slurp *in*)) :when (str/includes? line "=")]
                         (str/split line #"=" 2)))
           repo (some-> (get kv "path") (str/replace #"\.git$" ""))]
-      (when (and (= "github.com" (get kv "host")) repo)
+      (when (and (= "https" (get kv "protocol"))
+                 (= "github.com" (get kv "host")) repo)
         (let [s (agent-session)
               access (or (not-empty (System/getenv "KAGI_GIT_ACCESS")) "contents:read")
               {:keys [value]} (obtain! s (broker-url args)
