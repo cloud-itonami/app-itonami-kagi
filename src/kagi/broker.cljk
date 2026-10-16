@@ -31,6 +31,7 @@
   #?(:clj (:import [java.io File]
                    [java.nio.channels FileChannel]
                    [java.nio.file Paths StandardOpenOption]
+                   [java.time Instant]
                    [java.util UUID])))
 
 #?(:clj (defn- file ^File [& parts] (File. ^String (str/join "/" parts))))
@@ -149,6 +150,16 @@
   (set (remove nil? [(:agent/did principal) (:agent/label principal) (:agent/id principal)])))
 
 #?(:clj
+   (defn- active-principal? [principal now]
+     (and (map? principal)
+          (not (:agent/revoked-at principal))
+          (or (nil? (:agent/not-after principal))
+              (try
+                (.isBefore (Instant/ofEpochSecond now)
+                           (Instant/parse (:agent/not-after principal)))
+                (catch Exception _ false)))))
+
+#?(:clj
    (defn- sealed-path [home lease-id & [owner?]]
      (when-not (and (string? lease-id)
                     (re-matches #"[A-Za-z0-9][A-Za-z0-9_-]{0,127}" lease-id))
@@ -235,6 +246,8 @@
          (let [errors (klease/request-errors request)]
            (cond
              (seq errors) {:status :invalid :errors errors}
+             (not (active-principal? principal now))
+             {:status :denied :reasons [{:reason :principal-inactive}]}
              (not= (:request/principal request) (:agent/did principal))
              {:status :invalid :errors [:request/principal-mismatch]}
              (not= gh/token-ttl-sec (:request/ttl-sec request))
@@ -270,10 +283,23 @@
                {:keys [request principal decision] :as p} (read-edn path nil)]
            (if-not p
              {:status :absent :request-id request-id}
-             (let [d (assoc decision :approver approver :approved-at now)]
-               (append! home {:event :approved :at now :request-id request-id :approver approver})
-               (.delete (file path))
-               (issue! (assoc ctx :principal (principal-of principal) :request request :decision d)))))))))
+             (let [prin (principal-of principal)]
+               (cond
+                 (not prin)
+                 {:status :denied :reasons [{:reason :principal-unknown}]}
+
+                 (not (active-principal? prin now))
+                 (do
+                   (append! home {:event :denied :at now :request request
+                                  :reasons [{:reason :principal-inactive}]})
+                   (.delete (file path))
+                   {:status :denied :reasons [{:reason :principal-inactive}]})
+
+                 :else
+                 (let [d (assoc decision :approver approver :approved-at now)]
+                   (append! home {:event :approved :at now :request-id request-id :approver approver})
+                   (.delete (file path))
+                   (issue! (assoc ctx :principal prin :request request :decision d))))))))))
 
 #?(:clj
    (defn revoke!

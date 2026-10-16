@@ -88,10 +88,11 @@
 
 (defn- the-issuer [h]
   (let [is (broker/issuers h)]
-    (case (count is)
-      0 (die "no issuer — run: kagi issuer setup github")
-      1 (key (first is))
-      (die (str "several issuers; name one with --issuer: " (pr-str (keys is)))))))
+    (cond
+      (empty? is) (throw (ex-info "no issuer — run: kagi issuer setup github" {:issuers []}))
+      (= 1 (count is)) (key (first is))
+      :else (throw (ex-info (str "several issuers; name one with --issuer: " (pr-str (keys is)))
+                            {:issuers (vec (keys is))})))))
 
 (defn owner-ctx [session & [issuer-title]]
   (let [h (:vault-home session)
@@ -279,6 +280,7 @@
 
 (defn lease-serve [args]
   (let [session (owner-session)
+        ctx (owner-ctx session (arg-val args "--issuer"))
         host (or (arg-val args "--host") "127.0.0.1")
         port (or (some-> (arg-val args "--port") parse-long) 8978)
         server (HttpServer/create (InetSocketAddress. ^String host (int port)) 0)]
@@ -296,7 +298,6 @@
                               (if-not prin
                                 (reply 401 {:status :unauthenticated})
                                 (let [req (local-edn/read-text (:request body))
-                                      ctx (owner-ctx session)
                                       r (broker/mint! (assoc ctx :principal prin :request req))]
                                   (reply 200 r))))
                             (catch Exception e

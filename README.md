@@ -374,7 +374,7 @@ nbb/ブラウザ(`@noble/*`) で**同じ実装**を通る（両方向の interop
 # 持ち主（vault のある機械）: 1 回だけ。ページで Continue → Create GitHub App → Install
 bin/kagi issuer setup github [--org cloud-itonami]
 bin/kagi policy set fleet-policy.edn         # {:policies [kagitaba.policy …]}
-bin/kagi lease serve --host 100.x.y.z        # ノードからの署名つき要求を受ける
+bin/kagi lease serve --host 100.x.y.z [--issuer <title>]  # ノードからの署名つき要求を受ける
 bin/kagi lease pending | approve <req> | ls | revoke <lease>
 
 # agent（登録済み principal）

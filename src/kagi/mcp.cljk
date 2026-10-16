@@ -33,6 +33,8 @@
                             :description "owner/repo or owner/* — one account per request"}
                 :request_id {:type "string"
                              :description "Reuse the request_id returned by a pending response to retrieve the eventual result safely"}
+                :issuer {:type "string"
+                         :description "Configured GitHub App issuer title; required when the owner has multiple issuers"}
                 :ttl_sec {:type "integer" :minimum 3600 :maximum 3600 :default 3600
                           :description "GitHub installation tokens have a fixed one-hour lifetime"}
                 :purpose {:type "string" :description "why; recorded in the audit ledger"}}
@@ -66,6 +68,7 @@
    :resources (vec (:resources args))
    :ttl (:ttl_sec args)
    :request-id (:request_id args)
+   :issuer (:issuer args)
    :purpose (:purpose args)
    :provider (:provider args)})
 
