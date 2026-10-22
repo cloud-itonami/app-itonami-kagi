@@ -175,14 +175,29 @@
 
 ;; ───────── Ed25519 ─────────
 
+(defn- ->u8
+  "Coerce key material to a Uint8Array for the noble calls and the DER
+  unwrapper: a hybrid {:ed :mldsa} map unwraps to :ed, typed arrays pass
+  through, and countable byte containers (SCI byte-array, vectors) convert.
+  Anything else fails closed as nil."
+  [b]
+  (let [b (if (map? b) (:ed b) b)]
+    (cond
+      (instance? js/Uint8Array b) b
+      (and b (number? (.-length b))) (js/Uint8Array.from b)
+      (sequential? b) (js/Uint8Array.from (clj->js b))
+      :else nil)))
+
 (defn- ed-sign [priv msg]
   ;; noble v2: (sign message secret-key-32B). priv travels as the 32-byte seed;
   ;; a DER-wrapped PKCS#8 blob is unwrapped first (fail closed on mismatch).
-  (let [seed (if (= 32 (.-length priv)) priv (noble/unwrap-der :ed25519-pkcs8 priv))]
+  (let [priv (->u8 priv)
+        seed (if (= 32 (.-length priv)) priv (noble/unwrap-der :ed25519-pkcs8 priv))]
     (.sign (.-ed25519 (js/require "@noble/curves/ed25519.js")) msg seed)))
 
 (defn- ed-verify? [pub-der msg sig]
-  (let [pub (if (= 32 (.-length pub-der)) pub-der (noble/unwrap-der :ed25519-spki pub-der))]
+  (let [pub-der (->u8 pub-der)
+        pub (if (= 32 (.-length pub-der)) pub-der (noble/unwrap-der :ed25519-spki pub-der))]
     (.verify (.-ed25519 (js/require "@noble/curves/ed25519.js")) sig msg pub)))
 
 (defn- seed-bytes

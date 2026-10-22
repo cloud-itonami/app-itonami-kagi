@@ -67,7 +67,7 @@
          :git/sha "578a48aeca110497298d22ce6d8b322dc14fe170"}
         io.github.kotoba-lang/org-ietf-ed25519
         {:git/url "https://github.com/kotoba-lang/org-ietf-ed25519.git"
-         :git/sha "fdcefb9f1b83461fee54d04b63e374fa301ee847"}
+         :git/sha "238e32d4662b2682e7112c870818a1dcdde2143c"}
         io.github.kotoba-lang/tech-ipfs-specs-ipns
         {:git/url "https://github.com/kotoba-lang/tech-ipfs-specs-ipns.git"
          :git/sha "f2563eb1cb010c96f6dec1dfbd468fac93367498"}
