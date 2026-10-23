@@ -1,0 +1,46 @@
+;; Native CLI, new format only. No legacy vault / key import or ambient home.
+(ns kagi.native-cli
+  (:export [main])
+  (:require [kagi.agent-signer :refer [kg-field kg-hex? kg-line? kg-apply kg-keyset-problem kg-state-problem]]))
+
+(defn kc-arg [i :i64] :string (typed-cap-call 38 :string :string (string-from-i64 i)))
+(defn kc-output [s :string] :i64 (let [written (typed-cap-call 37 :string :string s)] 0))
+(defn kc-error [s :string] :i64 (let [written (typed-cap-call 39 :string :string (str "kagi: " s "\n"))] 2))
+(defn kc-line-end [s :string start :i64] :i64
+  (loop [i start]
+    (if (or (= i (string-length s)) (= (string-code-point-at s i) 10)) i (recur (+ i 1)))))
+(defn kc-event-end [s :string] :i64
+  (loop [i 0 blanks 0]
+    (cond (= i (string-length s)) -1
+          (= (string-code-point-at s i) 32) (if (= blanks 7) i (recur (+ i 1) (+ blanks 1)))
+          :else (recur (+ i 1) blanks))))
+;; LF-delimited records: exact event, 384-hex guardian signatures, 128-hex
+;; author proof. The genesis pin comes from the trusted operator / installer.
+;; Every state is derived from proofs; file-supplied state is never trusted.
+(defn kc-verify-bundle [text :string pin :string] :string
+  (if (or (not (kg-hex? pin 64)) (> (string-length text) 262144)) "error:bundle/pin-or-budget"
+    (loop [start 0 count 0 state ""]
+      (if (= start (string-length text))
+        (if (= count 0) "error:bundle/empty" state)
+        (if (>= count 64) "error:bundle/event-budget"
+          (let [end (kc-line-end text start) line (string-substring text start end)]
+            (if (not (kg-line? line 10)) "error:bundle/record-shape"
+              (let [event (string-substring line 0 (kc-event-end line))
+                    signatures (kg-field line 8) proof (kg-field line 9)
+                    reason (kg-keyset-problem state pin event signatures proof)]
+                (if (not= reason "") (str "error:" reason)
+                  (let [next-state (kg-apply state pin event signatures proof)]
+                    (recur (if (= end (string-length text)) end (+ end 1)) (+ count 1) next-state)))))))))))
+(defn main [] :i64
+  (let [command (kc-arg 0)]
+    (cond
+      (or (= command "") (= command "help") (= command "--help"))
+        (kc-output "kagi native v1\n  status\n  verify-keyset <trusted-genesis-sha256> <public-bundle-file>\nNo legacy vault or key migration. Signing/custody commands require qualified native providers.\n")
+      (= command "status")
+        (kc-output "{\"schema\":\"kagi.native.status.v1\",\"runtime\":\"amu-selfhost-native\",\"legacyKeys\":\"unsupported\",\"jvmFallback\":false,\"keysetVerifier\":true,\"custodyQualified\":false,\"nodeConnected\":false,\"cellConnected\":false}\n")
+      (= command "verify-keyset")
+        (let [pin (kc-arg 1) path (kc-arg 2) extra (kc-arg 3)]
+          (if (or (not (kg-hex? pin 64)) (= path "") (not= extra "")) (kc-error "usage: verify-keyset <trusted-genesis-sha256> <public-bundle-file>")
+            (let [input (typed-cap-call 35 :string :string path) state (kc-verify-bundle input pin)]
+              (if (= (kg-state-problem state) "") (kc-output (str state "\n")) (kc-error state)))))
+      :else (kc-error "unsupported command; native v1 has no legacy vault or key import"))))
