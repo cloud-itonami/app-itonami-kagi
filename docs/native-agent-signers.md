@@ -151,8 +151,10 @@ produced 27/28. Independent OpenSSL signatures match. CLI success derives
 genesis → rotate → revoke → recover; insufficient management proof,
 replayed transition, malformed/empty bundle and legacy commands refuse.
 
-Native entropy/clock replacement is an Amu candidate, separately tracked
-under AWAI-52. Existing generic native file writes create mode 0644; do not
+Native entropy/clock replacement is [Amu PR #1518](https://github.com/kotoba-lang/amu/pull/1518),
+tracked under AWAI-52. It passes native arm64 provider / refusal gates, combined
+self-rebuild fixed points and 24 runtime regressions, but is not an adopted root.
+Existing generic native file writes create mode 0644; do not
 use them to persist new private seeds. Private create/owner/mode checks,
 durable replay/audit commits, secret memory erasure, side-channel and full
 public-point admission qualification remain open. The pinned Ed25519

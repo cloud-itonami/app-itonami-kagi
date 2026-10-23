@@ -43,10 +43,11 @@ hata Cell execution, persistent stdio, Murakumo / Yataverse connection and
 restoration are not yet admitted by this foundation. `status` reports
 custody/node/Cell as unqualified/unconnected. No private seed is exported.
 
-Clock and entropy have catalog/legacy provider definitions, but the admitted
-Amu static root still refused them: wire 23 traps at runtime and wire 7 is
-refused by the compiler. Their native replacement is being implemented in
-Amu; no fallback to a JVM/provider or test randomness is permitted.
+The admitted Amu root refused native entropy / clock. Their native
+replacement in [Amu PR #1518](https://github.com/kotoba-lang/amu/pull/1518)
+now passes arm64 provider gates, ENOSYS / grant refusals, combined compiler
+self-rebuild and 24 exact runtime regressions. It remains a candidate pending
+full qualification; no bootstrap root has been replaced.
 Native file metadata, private creation and durable journal operations need
 their own runtime gates before operational custody.
 
