@@ -1,0 +1,28 @@
+{
+  "schema": "kagi.native-build.lock.v1",
+  "target": "aarch64-linux-static",
+  "compiler": {
+    "repository": "kotoba-lang/amu",
+    "revision": "116306620688f3c0c962b371c7d3a21088d828d2",
+    "path": "seed/bootstrap/aarch64-linux-static-root.elf",
+    "sha256": "61ee2d3870612c7f8ed6bd2d25f40c8cc68b26d2b5b5336204b1ff2651fe60bb"
+  },
+  "ownerSources": [
+    {
+      "repository": "kotoba-lang/org-nist-sha2",
+      "revision": "ea83e70a6a8efb8fb12dd5f0031fcda35a9ec77b",
+      "path": "kotoba/sha2/core.kotoba",
+      "sha256": "2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888"
+    },
+    {
+      "repository": "kotoba-lang/org-ietf-ed25519",
+      "revision": "6f17477b5be91a0c8c369b8d30e7e5ea0c10a8aa",
+      "path": "kotoba/ed25519/selfhost.kotoba",
+      "sha256": "47c086f3d93ad4f6da047bbf3b9250f7e4fbc7539ec1a0077abb2d82ceb3dc14"
+    }
+  ],
+  "assembler": "kotoba/kagi/assemble.kotoba",
+  "artifactSha256": "a89f56d731585363b93bd9502a1a107b9b9578763db35fbf7f5de14227f706ba",
+  "projectLinkQualified": false,
+  "cdciQualified": false
+}

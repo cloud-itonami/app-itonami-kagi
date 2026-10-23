@@ -1,5 +1,11 @@
 # ADR — kagi CLI の kexe 化 (amu native compiler 前提)
 
+> 2026-10-23: native-only / 新規 keyset の owner 指示により、以下の
+> hosted noble / kbb / JVM provider、旧 vault 移行・旧鍵互換と旧 CI の受入条件は
+> 廃止。現行の実装・ビルド・未認定境界は
+> [Native kagi v1](../native-agent-signers.md) を参照。以下は当時の記録であり、
+> 起動・ビルドの fallback として使用しない。
+
 - **Status**: Accepted (owner direction 2026-09-13, "bin/kagi を kotoba, amu native compiler で動くように天井突破" / "kexe 化を前提に")
 - **Date**: 2026-09-13
 - **Supersedes**: 「bin/kagi は JVM (`kbb -M:dev:cli`) を exec する」前提 — kbb cutover 4900d4a で書き換えられたが、kagi は JVM 専用機能 (`java.time.Instant`, JCA/BouncyCastle Argon2id, `java.nio.file`) に依存し kbb/sci で動かなかった (実測: `Unable to resolve classname: java.time.Instant`)。kexe 化が正解。

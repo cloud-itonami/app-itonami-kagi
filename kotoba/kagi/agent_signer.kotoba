@@ -1,0 +1,176 @@
+;; Native agent keyset / signer core. New format only; no legacy vault import.
+;; The host owns the genesis pin, verified state, clock, replay journal and
+;; private seed. An app supplies none of those authority inputs.
+;; Signed scope is an opaque exact identifier, not mon/CID admission by itself.
+;; SHA-256 identities below are explicitly digests, not IPLD CIDs.
+(ns kagi.agent-signer
+  (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
+            kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign])
+  (:require [sha2.core :refer [sha256-hex hex]]
+            [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
+
+(defn kg-bytes [s :string] :vector-i64 (vector-i64-from-bytes (string-to-utf8 s)))
+(defn kg-hash [s :string] :string (sha256-hex (kg-bytes s)))
+(defn kg-zero [n :i64] :string
+  (loop [i 0 s ""] (if (= i n) s (recur (+ i 1) (string-concat s "0")))))
+(defn kg-hex? [s :string n :i64] :bool
+  (and (= (string-length s) n)
+    (loop [i 0]
+      (if (= i n) true
+        (let [c (string-code-point-at s i)]
+          (if (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102))) (recur (+ i 1)) false))))))
+(defn kg-public? [s :string] :bool
+  (and (kg-hex? s 64) (not= s (kg-zero 64))
+       (not= s (string-concat "01" (kg-zero 62)))))
+(defn kg-line? [s :string fields :i64] :bool
+  (and (> (string-length s) 0) (<= (string-length s) 4096)
+    (loop [i 0 count 1 blank true]
+      (if (= i (string-length s)) (and (not blank) (= count fields))
+        (let [c (string-code-point-at s i)]
+          (cond (= c 32) (if blank false (recur (+ i 1) (+ count 1) true))
+                (or (< c 33) (> c 126)) false
+                :else (recur (+ i 1) count false)))))))
+(defn kg-field [s :string k :i64] :string
+  (loop [i 0 start 0 at 0]
+    (cond (= i (string-length s)) (if (= at k) (string-substring s start i) "")
+          (= (string-code-point-at s i) 32)
+            (if (= at k) (string-substring s start i) (recur (+ i 1) (+ i 1) (+ at 1)))
+          :else (recur (+ i 1) start at))))
+;; Canonical nonnegative decimal <= 999999999999999. No signs / leading zero.
+(defn kg-number [s :string] :i64
+  (if (or (= (string-length s) 0) (> (string-length s) 15)
+          (and (> (string-length s) 1) (= (string-code-point-at s 0) 48))) -1
+    (loop [i 0 n 0]
+      (if (= i (string-length s)) n
+        (let [c (string-code-point-at s i)]
+          (if (and (>= c 48) (<= c 57)) (recur (+ i 1) (+ (* n 10) (- c 48))) -1))))))
+(defn kg-label? [s :string] :bool
+  (and (> (string-length s) 0) (<= (string-length s) 128)
+    (loop [i 0]
+      (if (= i (string-length s)) true
+        (let [c (string-code-point-at s i)]
+          (if (or (and (>= c 97) (<= c 122)) (and (>= c 48) (<= c 57))
+                  (= c 45) (= c 46) (= c 58) (= c 95)) (recur (+ i 1)) false))))))
+(defn kg-guard [keys :string i :i64] :string (string-substring keys (* i 64) (* (+ i 1) 64)))
+(defn kg-guards? [keys :string threshold :i64] :bool
+  (if (not (kg-hex? keys 192)) false
+    (let [a (kg-guard keys 0) b (kg-guard keys 1) c (kg-guard keys 2) z (kg-zero 64)
+          count (+ (if (= a z) 0 1) (if (= b z) 0 1) (if (= c z) 0 1))]
+      (and (>= threshold 1) (<= threshold count)
+           (or (= a z) (kg-public? a)) (or (= b z) (kg-public? b)) (or (= c z) (kg-public? c))
+           (or (= a z) (not= a b)) (or (= a z) (not= a c)) (or (= b z) (not= b c))))))
+(defn kg-verify [pk :string message :string signature :string] :bool
+  (and (kg-public? pk) (kg-hex? signature 128)
+       (verify? (hex-bytes pk) (kg-bytes message) (hex-bytes signature))))
+(defn kg-management? [keys :string threshold :i64 event :string signatures :string] :bool
+  (and (kg-guards? keys threshold) (kg-hex? signatures 384)
+    (loop [i 0 count 0]
+      (if (= i 3) (>= count threshold)
+        (let [signature (string-substring signatures (* i 128) (* (+ i 1) 128)) pk (kg-guard keys i)]
+          (cond (= signature (kg-zero 128)) (recur (+ i 1) count)
+                (kg-verify pk (string-concat "kagi.keyset.manage.v1\n" event) signature) (recur (+ i 1) (+ count 1))
+                :else false))))))
+
+;; event: prefix operation epoch parent author policy guardians threshold
+(defn kg-event [op :string epoch :i64 parent :string author :string policy :string guards :string threshold :i64] :string
+  (str "kagi.keyset.event.v1 " op " " epoch " " parent " " author " " policy " " guards " " threshold))
+(defn kg-event? [event :string] :bool
+  (and (kg-line? event 8) (= (kg-field event 0) "kagi.keyset.event.v1")
+       (>= (kg-number (kg-field event 2)) 0) (kg-hex? (kg-field event 3) 64)
+       (kg-public? (kg-field event 4)) (kg-hex? (kg-field event 5) 64)
+       (kg-guards? (kg-field event 6) (kg-number (kg-field event 7)))))
+;; state: prefix genesis head epoch active|revoked author policy guardians threshold
+(defn kg-state-problem [state :string] :string
+  (cond (not (kg-line? state 9)) "keyset/state-shape"
+        (not= (kg-field state 0) "kagi.keyset.state.v1") "keyset/state-version"
+        (not (and (kg-hex? (kg-field state 1) 64) (kg-hex? (kg-field state 2) 64)
+                  (>= (kg-number (kg-field state 3)) 0)
+                  (or (= (kg-field state 4) "active") (= (kg-field state 4) "revoked"))
+                  (kg-public? (kg-field state 5)) (kg-hex? (kg-field state 6) 64)
+                  (kg-guards? (kg-field state 7) (kg-number (kg-field state 8))))) "keyset/state-fields"
+        :else ""))
+(defn kg-keyset-problem [previous :string trusted-genesis :string event :string signatures :string author-proof :string] :string
+  (cond
+    (not (kg-hex? trusted-genesis 64)) "keyset/genesis-pin"
+    (not (kg-event? event)) "keyset/event-shape"
+    (and (not= previous "") (not= (kg-state-problem previous) "")) "keyset/previous-state"
+    :else
+    (let [op (kg-field event 1) epoch (kg-number (kg-field event 2)) parent (kg-field event 3)
+          author (kg-field event 4) policy (kg-field event 5) guards (kg-field event 6) threshold (kg-number (kg-field event 7))
+          genesis (= previous "") old-author (kg-field previous 5)
+          management-keys (if genesis guards (kg-field previous 7))
+          management-threshold (if genesis threshold (kg-number (kg-field previous 8)))
+          possession (or genesis (= op "rotate") (= op "recover"))]
+      (cond
+        (and genesis (not= op "genesis")) "keyset/genesis-required"
+        (and genesis (or (not= epoch 0) (not= parent (kg-zero 64)) (not= (kg-hash event) trusted-genesis))) "keyset/genesis-pin"
+        (and (not genesis) (not= (kg-field previous 1) trusted-genesis)) "keyset/foreign-keyset"
+        (and (not genesis) (or (not= parent (kg-field previous 2)) (not= epoch (+ 1 (kg-number (kg-field previous 3)))))) "keyset/parent-or-epoch"
+        (and (not genesis) (not (or (= op "rotate") (= op "recover") (= op "revoke") (= op "govern")))) "keyset/operation"
+        (and (or (= op "rotate") (= op "revoke")) (not= (kg-field previous 4) "active")) "keyset/not-active"
+        (and (= op "recover") (not= (kg-field previous 4) "revoked")) "keyset/not-revoked"
+        (and (or (= op "rotate") (= op "recover")) (= author old-author)) "keyset/unchanged-author"
+        (and (or (= op "revoke") (= op "govern")) (not= author old-author)) "keyset/author-change"
+        (and (= op "revoke") (or (not= policy (kg-field previous 6)) (not= guards (kg-field previous 7))
+                                  (not= threshold (kg-number (kg-field previous 8))))) "keyset/revoke-changes-policy"
+        (not (kg-management? management-keys management-threshold event signatures)) "keyset/management-signature"
+        (and possession (not (kg-verify author (string-concat "kagi.keyset.author.v1\n" event) author-proof))) "keyset/author-possession"
+        (and (not possession) (not= author-proof (kg-zero 128))) "keyset/unexpected-author-proof"
+        :else ""))))
+(defn kg-apply [previous :string trusted-genesis :string event :string signatures :string author-proof :string] :string
+  (if (not= (kg-keyset-problem previous trusted-genesis event signatures author-proof) "") ""
+    (let [op (kg-field event 1)
+          revoked (or (= op "revoke") (and (= op "govern") (= (kg-field previous 4) "revoked")))]
+      (str "kagi.keyset.state.v1 " trusted-genesis " " (kg-hash event) " " (kg-field event 2) " "
+           (if revoked "revoked" "active") " " (kg-field event 4) " " (kg-field event 5) " " (kg-field event 6) " " (kg-field event 7)))))
+
+;; policy: prefix agent|node scope audience delegate purpose max-ttl-ms
+;; One exact purpose / scope / audience; no wildcard or transitive delegation.
+(defn kg-policy-problem [policy :string] :string
+  (cond (not (kg-line? policy 7)) "signer/policy-shape"
+        (not= (kg-field policy 0) "kagi.agent.policy.v1") "signer/policy-version"
+        (not (and (kg-label? (kg-field policy 2)) (kg-label? (kg-field policy 3))
+                  (kg-public? (kg-field policy 4)) (> (kg-number (kg-field policy 6)) 0)
+                  (<= (kg-number (kg-field policy 6)) 60000))) "signer/policy-fields"
+        (not (or (and (= (kg-field policy 1) "agent")
+                      (or (= (kg-field policy 5) "cell-action") (= (kg-field policy 5) "state-commit")))
+                 (and (= (kg-field policy 1) "node")
+                      (or (= (kg-field policy 5) "node-declaration") (= (kg-field policy 5) "node-heartbeat"))))) "signer/role-purpose"
+        :else ""))
+;; permit: prefix keyset head epoch purpose scope audience body parent fence sequence issued expires
+(defn kg-permit-problem [state :string policy :string permit :string signature :string now :i64
+                         last-sequence :i64 fence :i64 parent :string] :string
+  (cond
+    (not= (kg-state-problem state) "") "signer/state"
+    (not= (kg-field state 4) "active") "signer/revoked"
+    (not= (kg-policy-problem policy) "") "signer/policy"
+    (not= (kg-hash policy) (kg-field state 6)) "signer/policy-pin"
+    (not (and (kg-line? permit 13) (= (kg-field permit 0) "kagi.agent.permit.v1"))) "signer/permit-shape"
+    :else
+    (let [epoch (kg-number (kg-field permit 3)) issued (kg-number (kg-field permit 11)) expires (kg-number (kg-field permit 12))
+          sequence (kg-number (kg-field permit 10)) requested-fence (kg-number (kg-field permit 9))]
+      (cond
+        (or (not= (kg-field permit 1) (kg-field state 1)) (not= (kg-field permit 2) (kg-field state 2))
+            (not= epoch (kg-number (kg-field state 3)))) "signer/keyset-head-epoch"
+        (or (not= (kg-field permit 4) (kg-field policy 5)) (not= (kg-field permit 5) (kg-field policy 2))
+            (not= (kg-field permit 6) (kg-field policy 3))) "signer/purpose-scope-audience"
+        (not (and (kg-hex? (kg-field permit 7) 64) (kg-hex? (kg-field permit 8) 64))) "signer/digest"
+        (or (< fence 0) (< requested-fence 0) (not= requested-fence fence) (not= (kg-field permit 8) parent)) "signer/writer-fence-parent"
+        (or (< last-sequence 0) (< sequence 1) (not= sequence (+ last-sequence 1))) "signer/replay-or-sequence"
+        (or (< now 0) (< issued 0) (< expires issued) (> issued now) (> now expires)
+            (> (- expires issued) (kg-number (kg-field policy 6)))) "signer/deadline"
+        (not (kg-verify (kg-field policy 4) permit signature)) "signer/delegate-signature"
+        :else ""))))
+(defn kg-permit-message [permit :string] :string (string-concat "kagi.agent.action.v1\n" permit))
+;; Output: only the author signature, or empty on refusal. The native host
+;; commits the replay journal / audit before exposing a successful signature.
+;; This pure function does not persist state, obtain a clock, grant authority,
+;; verify a mon schema, execute a Cell or publish a Yataverse block.
+(defn kg-sign [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
+              last-sequence :i64 fence :i64 parent :string] :string
+  (if (or (not= (vector-count seed) 32)
+          (not= (kg-permit-problem state policy permit signature now last-sequence fence parent) "")) ""
+    (let [public (hex (public-from-seed seed))]
+      (if (not= public (kg-field state 5)) ""
+        (let [output (vector-alloc 64) result (sign-into output seed (kg-bytes (kg-permit-message permit)))]
+          (if (= result 0) (hex output) ""))))))
