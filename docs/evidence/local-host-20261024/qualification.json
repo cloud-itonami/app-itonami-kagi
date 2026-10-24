@@ -14,5 +14,6 @@
     "native build and execution; Python/Podman diagnostic orchestration",
     "no native installer/CDCI adoption",
     "no Cell or distributed head freshness qualification"
-  ]
+  ],
+  "agentBotIsolationCases": 7
 }

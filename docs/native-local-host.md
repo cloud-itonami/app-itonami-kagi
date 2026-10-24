@@ -91,3 +91,27 @@ assembly is a bounded component builder, not a general project linker or
 native public installer/CDCI controller. Secret-memory, constant-time,
 hardware/independent custody and distributed head freshness remain open.
 Do not promote local enrollment or an OCI process to hata Cell execution.
+
+
+## Local-only qualification, 2026-10-24
+
+The owner selected validation on this Mac only; independent production
+custody and guardian placement are deferred. The separate host lock is
+[`native-local-host.lock.json`](../native-local-host.lock.json). Receipts
+record 16 node-host lifecycle cases and 7 agent/bot isolation cases. Agent
+and bot roots generate distinct identities, reject each other's permits,
+and maintain independent sequences. A `cell-action` / `state-commit`
+signature here does not execute a Cell or commit a distributed state DAG.
+
+With the pinned executable on arm64 Linux, run each diagnostic into a new
+private fixture directory:
+
+```text
+python3 test/native/host_gate.py --artifact /verified/kagi-host --output /new/node-fixtures
+python3 test/native/agent_host_gate.py --artifact /verified/kagi-host --output /new/agent-fixtures
+```
+
+These output directories contain new private keys; keep them outside Git,
+static hosting and release artifacts. Only public JSON receipts belong in
+the evidence record. The public Mac watcher uses a separate retained local
+qualification profile and does not regenerate its keys when restarted.
