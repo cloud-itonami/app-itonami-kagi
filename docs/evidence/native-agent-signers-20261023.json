@@ -1,0 +1,158 @@
+{
+  "schema": "kagi.native-component-receipt.v1",
+  "date": "2026-10-23",
+  "candidate": true,
+  "target": "aarch64-linux-static",
+  "runtime": "Amu combined selfhost direct ELF entry; Linux VM on macOS",
+  "buildDependencyFallbacks": [],
+  "legacyKeys": "unsupported",
+  "ownerSourcePins": [
+    {
+      "repository": "kotoba-lang/org-nist-sha2",
+      "revision": "ea83e70a6a8efb8fb12dd5f0031fcda35a9ec77b",
+      "path": "kotoba/sha2/core.kotoba",
+      "sha256": "2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888"
+    },
+    {
+      "repository": "kotoba-lang/org-ietf-ed25519",
+      "revision": "6f17477b5be91a0c8c369b8d30e7e5ea0c10a8aa",
+      "path": "kotoba/ed25519/selfhost.kotoba",
+      "sha256": "47c086f3d93ad4f6da047bbf3b9250f7e4fbc7539ec1a0077abb2d82ceb3dc14"
+    }
+  ],
+  "sources": {
+    "kotoba/kagi/agent_signer.kotoba": "0124fc20e7c7b434c71823712b94c4e61b78c8cbf29a2905cdc8a9c76005f75d",
+    "kotoba/kagi/cli.kotoba": "559ab1cecd1627fc88858c7d97504f910fccd3c5de47bbd18703e58ff48347cb",
+    "kotoba/kagi/assemble.kotoba": "37642fb3ac0162a12e47b418dd75006303feb36bbebfb52e6bf0fdb5425c966c",
+    "test/native/agent_signer_gate.kotoba": "53669fe4beb81be279a6931dc45e6de4773bf824cdc93f6e26fa0079a9649a01",
+    "test/native/agent_signer_vectors.kotoba": "22225702550050c4ccc334c07dc9bd7c40ffa771374ba1c70c5d1a3781252fa8",
+    "test/native/agent_signer_vectors.json": "8ece17baa59b134bd4413cda861a593fffc6169a806422d532ad33400c53d6b4"
+  },
+  "artifacts": {
+    "compiler.elf": {
+      "sha256": "61ee2d3870612c7f8ed6bd2d25f40c8cc68b26d2b5b5336204b1ff2651fe60bb",
+      "bytes": 3039744,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/kagi-assemble-r1.elf": {
+      "sha256": "b1393b936fc365e60c4c984efea4f7a12728df57a9c6bbe8aff17234471caa50",
+      "bytes": 225792,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/kagi-cli-native-assembly.elf": {
+      "sha256": "a89f56d731585363b93bd9502a1a107b9b9578763db35fbf7f5de14227f706ba",
+      "bytes": 328192,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/agent-signer-native-assembly.elf": {
+      "sha256": "cbd33e1ebef9d4affadeb2e78bc091eca627ae432029a48d5876f02e5247fb18",
+      "bytes": 356864,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/agent-signer-gate-r2.elf": {
+      "sha256": "cbd33e1ebef9d4affadeb2e78bc091eca627ae432029a48d5876f02e5247fb18",
+      "bytes": 356864,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/no-management-r2.elf": {
+      "sha256": "a010868732e3ac4c534b60aaf22261af1df2c10cd169d5983fc4b5547508124a",
+      "bytes": 356864,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/no-delegate-r2.elf": {
+      "sha256": "86532e9ffe2ab058e9b23657122429843d6f252fc880cfb43ad0cac5e839393f",
+      "bytes": 356864,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    },
+    "build/no-replay-r2.elf": {
+      "sha256": "c03473cd7baa28f34ed8683e48ffa0106f2956353540d2e4171f28f541c85d84",
+      "bytes": 356864,
+      "elfMachine": 183,
+      "hasInterpreter": false
+    }
+  },
+  "nativeAssembly": {
+    "cliSourceSha256": "7339cfd10fb2b617210730d47e5ef2868a5989f84aab960e03cdea118e8b46ea",
+    "gateSourceSha256": "4501cd787198c6bdb552ffdc4d6c343f9abf398616c929c70abe5a0834e09da0",
+    "cliArtifactEqualsDiagnosticAssembly": true
+  },
+  "gates": {
+    "signer": {
+      "pass": 28,
+      "total": 28,
+      "nativeAssemblyRebuildPass": 28
+    },
+    "mutations": {
+      "no-management": {
+        "pass": 25,
+        "total": 28,
+        "missingCheckDetected": true
+      },
+      "no-delegate": {
+        "pass": 27,
+        "total": 28,
+        "missingCheckDetected": true
+      },
+      "no-replay": {
+        "pass": 27,
+        "total": 28,
+        "missingCheckDetected": true
+      }
+    },
+    "cli": {
+      "statusThroughNativeSymlink": true,
+      "publicKeysetChainExit": 0,
+      "insufficientManagementProofExit": 2,
+      "replayExit": 2,
+      "malformedExit": 2,
+      "emptyExit": 2,
+      "legacyGetExit": 2,
+      "legacyImportExit": 2,
+      "wrongGenesisPinExit": 2
+    },
+    "assembler": {
+      "ownerDigestMismatchExit": 2,
+      "existingOutputExit": 2,
+      "legacyModeExit": 2,
+      "noRejectedOutputCreated": true
+    }
+  },
+  "fixtureOracle": {
+    "implementation": "OpenSSL",
+    "version": "3.6.4",
+    "publicRFC8032SeedsOnly": true,
+    "diagnosticOnly": true
+  },
+  "qualification": {
+    "productionCustody": false,
+    "privateKeyGenerationOrStorage": false,
+    "constantTimeAndSecretErasure": false,
+    "fullPublicPointAdmission": false,
+    "durableReplayAudit": false,
+    "distributedHeadFreshness": false,
+    "nodeRegistration": false,
+    "cellExecution": false,
+    "serviceConnection": false,
+    "restoration": false,
+    "nativeCdci": false,
+    "projectLinker": false,
+    "mergedOrPublished": false
+  },
+  "compilerRevision": "116306620688f3c0c962b371c7d3a21088d828d2",
+  "publicBundles": {
+    "empty.bundle": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "genesis.bundle": "1cb23c12b06f18e93a365f985c9fbed01b5014ed98816abe7a81aa370d4f8e9a",
+    "genesis.sha256": "2fa939e41373c0822d46f13566abaa79fe4eacbea742a59ca09c6f053fdea5f5",
+    "good.bundle": "bfb87da25d463a224692113464b85660f387993a2204dfbabd352f31234c60b3",
+    "insufficient.bundle": "1ec634570f9056a4b2caad6f5eb8608a74a6bf2a5b461b53e513eb7c34d4b8f3",
+    "malformed.bundle": "af518c0ad6163e41495e0d859cc0521fe2ea6a48cbe31388355909e148eb2d42",
+    "replay.bundle": "67ac0fd41c22b7cc249f0a71af7cfb381fee4b7293e70d8b2328ec3c432ac076"
+  }
+}
