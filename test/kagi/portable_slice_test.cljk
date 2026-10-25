@@ -9,7 +9,7 @@
   namespace, and the graph says so immediately."
   (:require [clojure.java.io :as io]
             [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest is testing]]))
+            [kotoba.test :refer [deftest is testing]]))
 
 (def ^:private portable-roots
   "The slice that has to run wherever the API runs. `kagi.agent` itself is NOT
@@ -21,7 +21,7 @@
 (defn- source-file [ns-sym]
   (let [base (-> (name ns-sym) (str/replace "-" "_") (str/replace "." "/"))]
     (some (fn [ext] (let [f (io/file "src" (str base ext))] (when (.exists f) f)))
-          [".cljc" ".clj" ".cljs"])))
+          [".cljc" ".clj" ".cljs" ".cljk"])))
 
 (defn- required-nses [^java.io.File f]
   (let [src (slurp f)]

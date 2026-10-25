@@ -6,8 +6,8 @@
   that the last step — turning released ciphertext into a secret — happens in
   the CLIENT. If the server ever started returning plaintext, this suite would
   keep passing only if the SDK also stopped decrypting, and it does not."
-  (:require [kotoba.lang.text :as str]
-            [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
+            [kotoba.test :refer [deftest testing is]]
             [kagi.agent :as agent]
             [kagi.agent-client :as client]
             [kagi.agent-http :as agent-http]
@@ -58,9 +58,9 @@
         vmk (crypto/rand-bytes p 32)
         st (store/mem-store {:members {(:did owner) (identity/member-record owner :owner)}})
         _ (run-owner p owner st vmk {:op :item/create :item-id "shared" :compartment "ops"
-                                     :plaintext (.getBytes "over-the-wire-secret" "UTF-8")} :seed)
+                                     :plaintext (kbytes/utf8-bytes "over-the-wire-secret")} :seed)
         _ (run-owner p owner st vmk {:op :item/create :item-id "private" :compartment "ops"
-                                     :plaintext (.getBytes "never-shared" "UTF-8")} :seed)
+                                     :plaintext (kbytes/utf8-bytes "never-shared")} :seed)
         {:keys [secret record]} (agent/mint-invite p {:compartments (or compartments #{"ops"})
                                                       :ops ops
                                                       :uses (or uses 1)
@@ -216,12 +216,12 @@
 
 (deftest a-non-loopback-base-url-must-be-https
   (testing "平文で LAN へ token を投げる client は作れない"
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"requires HTTPS"
+    (is (thrown-with-msg? kerror/ExceptionInfo #"requires HTTPS"
                           (client/client {:base-url "http://10.0.0.5:8080" :tenant "did:key:z1"})))
     (is (map? (client/client {:base-url "https://vault.example" :tenant "did:key:z1"})))
     (is (map? (client/client {:base-url "http://127.0.0.1:9999" :tenant "did:key:z1"})))
     (testing ":tenant は必須 — 経路が tenant を名指すので省略できない"
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo #":tenant"
+      (is (thrown-with-msg? kerror/ExceptionInfo #":tenant"
                             (client/client {:base-url "https://vault.example"}))))))
 
 (deftest enrollment-does-not-rewrite-the-vault-snapshot

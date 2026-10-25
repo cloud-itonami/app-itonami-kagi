@@ -23,8 +23,8 @@
     kagi rotate <name>              # DEK を回転(再封緘)
     kagi log                        # 監査台帳(hybrid 署名 + ハッシュ鎖)を検証して表示
     kagi whoami                     # 自分の did:key / IPNS graph"
-  (:require [clojure.edn :as edn]
-            [clojure.pprint :as pprint]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
+            [kotoba.pprint :as pprint]
             [kotoba.lang.text :as str]
             [langgraph.graph :as g]
             [kagi.operation :as op]
@@ -41,6 +41,7 @@
             [kagi.agent-protocol :as agent-proto]
             [kagi.agent-service :as agent-service]
             [kagi.secret-store :as secret-store]
+            [kagi.local-edn :as local-edn]
             [kagi.clipboard :as clipboard]
             [kagi.autofill :as autofill]
             [kagi.unlock :as unlock]
@@ -53,10 +54,35 @@
             [kagi.sync :as sync]
             [kagi.import.onepassword :as import-1p]
             [kagitaba.category :as kcat])
-  (:import [java.time Instant]
-           [java.awt Desktop Desktop$Action]
-           [java.net URI]
-           [java.util UUID]))
+  #?(:clj
+     (:import [java.time Instant]
+              [java.awt Desktop Desktop$Action]
+              [java.net URI]
+              [java.util UUID])))
+
+;; ───────── host 境界: clock / uuid / browser-open ─────────
+;;
+;; kbb (sci on Node) では java.* が無いので、CLI が使う 3 つの host 機能を
+;; ここで 1 か所に吸収する (ADR-2609112000 の「判断を含まない機構層」)。
+;; JVM 経路は java.time.Instant / UUID を使い、kbb 経路は js/Date / crypto.randomUUID。
+(defn host-now-str
+  "ISO-8601 の現在時刻文字列。JVM: java.time.Instant。kbb: js/Date.toISOString。
+   record-reference! の :recorded-at 等の平文監査面にしか出ない。"
+  []
+  #?(:clj (str (Instant/now))
+     :cljs (.toISOString (js/Date.))))
+
+(defn host-uuid
+  "ランダム UUID 文字列。JVM: java.util.UUID/randomUUID。kbb: crypto.randomUUID。"
+  []
+  #?(:clj (str (java.util.UUID/randomUUID))
+     :cljs (js/crypto.randomUUID)))
+
+(defn host-plus-1h-str
+  "現在時刻 +1 時間の ISO-8601。CACAO の :expiry 用。"
+  []
+  #?(:clj (str (.plusSeconds (Instant/now) 3600))
+     :cljs (.toISOString (js/Date. (+ (.getTime (js/Date.)) 3600000)))))
 
 ;; Vault home resolution (ADR-2607170500). The vault MUST NOT live in a repo
 ;; checkout / per-agent worktree: those get cleaned, re-cloned, or clobbered by
@@ -128,7 +154,7 @@
 ;; ───────── VMK unlock ─────────
 
 (defn- derive-kek [p pass salt]
-  (crypto/argon2id p (.getBytes ^String pass "UTF-8") salt {:m-kb 262144 :t 3 :p 4}))
+  (crypto/argon2id p (kbytes/utf8-bytes ^String pass) salt {:m-kb 262144 :t 3 :p 4}))
 
 (defn- new-vmk-meta [p pass]
   (let [vmk  (crypto/rand-bytes p 32)
@@ -164,8 +190,8 @@
 
 (defn- self-cacao [id]
   (cacao/mint id {:cap :cap/admin :scope (:graph id)}
-              {:aud aud :nonce (str (UUID/randomUUID))
-               :issued-at (str (Instant/now)) :expiry (str (.plusSeconds (Instant/now) 3600))}))
+              {:aud aud :nonce (str (host-uuid))
+               :issued-at (host-now-str) :expiry (host-plus-1h-str)}))
 
 (defn- context [id vmk purpose]
   ;; `:now` is not decoration: `do-effect` stamps `:item/key-created-at` with
@@ -173,13 +199,13 @@
   ;; `key-registry/authorize!` fails closed without a current time, which is
   ;; what `:share/grant` needs to check a recipient's KEM key lifecycle.
   {:did (:did id) :role :owner :phase 3 :vmk vmk :purpose purpose
-   :now (str (Instant/now))
+   :now (host-now-str)
    :aud aud :cacao (self-cacao id) :register (identity/member-record id :owner)})
 
 (defn- run-op! [p id store vmk req purpose]
   (let [actor (op/build store {:crypto p :signer (identity/sign-secret id)})]
     (:state (g/run* actor {:request req :context (context id vmk purpose)}
-                    {:thread-id (str (:op req) "-" (:item-id req) "-" (UUID/randomUUID))}))))
+                    {:thread-id (str (:op req) "-" (:item-id req) "-" (host-uuid))}))))
 
 (defn- run-op-with!
   "`run-op!` plus two things the sharing commands need.
@@ -199,7 +225,7 @@
                                :signer (identity/sign-secret id)
                                :signer-key (:signing-key id)})]
     (:state (g/run* actor {:request req :context (merge (context id vmk purpose) extra)}
-                    {:thread-id (str (:op req) "-" (:item-id req) "-" (UUID/randomUUID))}))))
+                    {:thread-id (str (:op req) "-" (:item-id req) "-" (host-uuid))}))))
 
 ;; ───────── opts ─────────
 
@@ -349,7 +375,7 @@
           (when (str/blank? secret) (die "empty secret on stdin"))
           (run-op! p id st vmk (cond-> {:op :item/create :item-id name
                                         :compartment comp
-                                        :plaintext (.getBytes secret "UTF-8")}
+                                        :plaintext (kbytes/utf8-bytes secret)}
                                  cat (assoc :category cat))
                    :cli-add)
           (println "stored" name "in" comp (if cat (str "as " cat) ""))
@@ -359,7 +385,7 @@
             (let [r (record-reference! record-path
                                        {:item name :compartment comp
                                         :category cat :did (:did id)
-                                        :now (str (Instant/now))})]
+                                        :now (host-now-str)})]
               (println "recorded" (:credential/item r) "->" record-path))))))))
 
 (defn- cmd-get [p id args]
@@ -370,7 +396,7 @@
         (when-not (store/item st name) (die "no such item:" name))
         (let [r (run-op! p id st vmk {:op :item/reveal :item-id name} :cli-get)
               pt (get-in r [:result :plaintext])]
-          (if pt (print (String. ^bytes pt "UTF-8"))
+          (if pt (print (kbytes/utf8-string ^bytes pt))
               (die "reveal denied:" (get-in r [:result :effect]))))))))
 
 (defn- cmd-copy [p id args]
@@ -386,7 +412,7 @@
         (let [r (run-op! p id st vmk {:op :item/reveal :item-id name} purpose)
               pt (get-in r [:result :plaintext])]
           (if pt
-            (let [secret (String. ^bytes pt "UTF-8")]
+            (let [secret (kbytes/utf8-string ^bytes pt)]
               ;; Printed BEFORE the wait, so the operator can paste while this
               ;; holds custody. It used to print and exit, which killed the
               ;; daemon thread that was supposed to clear the clipboard and
@@ -432,7 +458,7 @@
                   out (autofill/fill-secret!
                        {:page-ws (:webSocketDebuggerUrl page)
                         :selector selector
-                        :secret (String. ^bytes pt "UTF-8")})]
+                        :secret (kbytes/utf8-string ^bytes pt)})]
               ;; Lengths, never the value: enough to tell a landed write from
               ;; a truncated one, not enough to disclose a character of it.
               (println (pr-str (assoc (select-keys out [:ok? :verdict :expected-length
@@ -554,7 +580,7 @@
   [p args]
   ;; args are ["device" "grant" "<file>" ...] -- the file is the THIRD element.
   (let [file (or (nth args 2 nil) (die "usage: kagi device grant <request.edn> --fingerprint FP"))
-        request (edn/read-string (slurp file))
+        request (local-edn/read-file file)
         confirmed (arg-val args "--fingerprint")
         data (or (persist/load* vault-path) (die "no vault — run: kagi init"))
         vmk (unlock-vmk-auto p (:meta data))
@@ -562,7 +588,7 @@
         grant (try
                 (device/make-grant p vmk request confirmed
                                    {:ttl-sec (or ttl device/default-ttl-sec)})
-                (catch clojure.lang.ExceptionInfo e
+                (catch #?(:clj clojure.lang.ExceptionInfo :cljs kerror/ExceptionInfo) e
                   (die (str "device grant refused: "
                             (pr-str (:device/errors (ex-data e)))))))
         out (or (arg-val args "--out") "device-grant.edn")]
@@ -578,12 +604,12 @@
   records the device, and writes the vault. The grant is not needed again."
   [p args]
   (let [file (or (nth args 2 nil) (die "usage: kagi device accept <grant.edn>"))
-        grant (edn/read-string (slurp file))
+        grant (local-edn/read-file file)
         data (or (persist/load* vault-path)
                  (die "no vault — run: kagi pull first (grant unlocks it, it does not create it)"))
         {:keys [vmk wrap device-id]}
         (try (device/accept-grant! p grant {})
-             (catch clojure.lang.ExceptionInfo e
+             (catch #?(:clj clojure.lang.ExceptionInfo :cljs kerror/ExceptionInfo) e
                (die (str "device accept refused: " (pr-str (:device/errors (ex-data e)))))))
         meta (-> (:meta data)
                  (unlock/add-wrap wrap)
@@ -696,21 +722,21 @@
   [p id args]
   (let [file (or (nth args 2 nil)
                  (die "usage: kagi agent approve <agent-request.edn> --fingerprint FP [--compartment C]... [--ops reveal,list] [--ttl-days 30]"))
-        request (edn/read-string (slurp file))
+        request (local-edn/read-file file)
         confirmed (or (arg-val args "--fingerprint")
                       (die "--fingerprint は必須。agent が表示した値を読み上げて渡すこと —
                             省くと攻撃者の公開鍵を登録しても気付けない"))
         scope (agent-scope args)
         _ (or (persist/load* vault-path) (die "no vault — run: kagi init"))
         store* (agent-store id args)           ; migrates a legacy registry once
-        invite (merge #:invite{:id (str "direct:" (java.util.UUID/randomUUID))}
+        invite (merge #:invite{:id (str "direct:" (host-uuid))}
                       {:invite/compartments (:compartments scope)
                        :invite/ops (:ops scope)
                        :invite/purposes (:purposes scope)
                        :invite/agent-ttl-sec (:agent-ttl-sec scope)})
         {:keys [token principal]}
         (try (agent/approve p request {:invite invite :confirmed-fingerprint confirmed})
-             (catch clojure.lang.ExceptionInfo e
+             (catch #?(:clj clojure.lang.ExceptionInfo :cljs kerror/ExceptionInfo) e
                (die (str "agent approval refused: " (pr-str (:agent/errors (ex-data e)))))))]
     ;; The vault is not touched. The member record `:share/grant` needs is
     ;; derived from the principal at grant time (`kagi.agent/member-of`).
@@ -1050,7 +1076,7 @@
           result (run-op! p id st vmk {:op :item/reveal :item-id item-id} :recovery-get)
           plaintext (get-in result [:result :plaintext])]
       (save-store! st (:meta data))
-      (if plaintext (print (String. ^bytes plaintext "UTF-8"))
+      (if plaintext (print (kbytes/utf8-string ^bytes plaintext))
           (die "recovery reveal denied")))))
 
 ;; ───────── cloud sync (kotobase.net) ─────────
@@ -1160,7 +1186,11 @@ KAGI_IDENTITY_STORE=keychain で新規 identity 秘密鍵を Apple Keychain に�
           (#{"help" "-h" "--help"} (first args))
           (some #{"-h" "--help"} args))
     (help)
-    (let [p  (crypto/jvm-provider)
+    ;; A reader conditional, not `(if (resolve ...))`: the JVM compiler
+    ;; rejects the unresolvable `crypto/default-provider` symbol at compile
+    ;; time even inside a branch that never runs.
+    (let [p  #?(:clj (crypto/jvm-provider)
+                :cljs (crypto/default-provider))
           cmd (first args)
           ;; `identity-migrate` must be able to READ the very plaintext
           ;; identity it exists to move into a SecretStore.

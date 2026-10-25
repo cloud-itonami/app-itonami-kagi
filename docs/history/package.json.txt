@@ -1,12 +1,13 @@
 {
-  "name": "kagi-browser-crypto",
+  "name": "@kotoba-lang/kagi",
   "private": true,
   "description": "Browser-side crypto deps for kagi.crypto.noble (the CLJS sibling of the JVM JCA provider). JVM consumers pulling this repo via :local/root or :git/sha never need these.",
   "dependencies": {
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
-    "@noble/post-quantum": "^0.6.1"
+    "@noble/post-quantum": "^0.6.1",
+    "@kotoba-lang/kagitaba": "git+https://github.com/kotoba-lang/kagitaba.git#713c6976258f7a4863232922a701a8177f250d26"
   },
   "devDependencies": {
     "nbb": "^1.3.196"
@@ -15,6 +16,24 @@
     "test:cljs": "kbb --backend sci --classpath src:test -m kagi.crypto.noble-interop-test",
     "test:reference": "kbb --backend sci --classpath src:test:../org-nist-aes/src:../org-nist-sha2/src -m kagi.crypto.reference-aead-test",
     "test:reference-hashes": "kbb --backend sci --classpath src:test:../org-nist-sha2/src -m kagi.digest.reference-test",
-    "test:digest": "kbb --backend sci --classpath src:test -m kagi.digest-noble-test"
-  }
+    "test:digest": "kbb --backend sci --classpath src:test -m kagi.digest-noble-test",
+    "test:kbb-read": "kbb --backend sci --classpath src:test -m kagi.kbb-read-test",
+    "test:sdk": "node --test sdk/*.test.mjs"
+  },
+  "version": "0.5.0",
+  "type": "module",
+  "exports": {
+    "./mithril-vault": {
+      "types": "./sdk/vault.d.mts",
+      "default": "./sdk/vault.mjs"
+    },
+    "./mithril-transfer": {
+      "types": "./sdk/transfer.d.mts",
+      "default": "./sdk/transfer.mjs"
+    }
+  },
+  "files": [
+    "sdk",
+    "LICENSE"
+  ]
 }
