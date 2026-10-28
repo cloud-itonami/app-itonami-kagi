@@ -5,7 +5,8 @@
 ;; SHA-256 identities below are explicitly digests, not IPLD CIDs.
 (ns kagi.agent-signer
   (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
-            kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign])
+            kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign
+            kg-did-key? kg-did-of kg-transfer-body kg-transfer-id kg-sign-transfer])
   (:require [sha2.core :refer [sha256-hex hex]]
             [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
 
@@ -143,7 +144,8 @@
         (not (or (and (= (kg-field policy 1) "agent")
                       (or (= (kg-field policy 5) "cell-action") (= (kg-field policy 5) "state-commit") (= (kg-field policy 5) "cell-writes")))
                  (and (= (kg-field policy 1) "node")
-                      (or (= (kg-field policy 5) "node-declaration") (= (kg-field policy 5) "node-heartbeat") (= (kg-field policy 5) "node-statements"))))) "signer/role-purpose"
+                      (or (= (kg-field policy 5) "node-declaration") (= (kg-field policy 5) "node-heartbeat") (= (kg-field policy 5) "node-statements")))
+                 (and (= (kg-field policy 1) "funds") (= (kg-field policy 5) "en-transfer")))) "signer/role-purpose"
         :else ""))
 ;; permit: prefix keyset head epoch purpose scope audience body parent fence sequence issued expires
 (defn kg-permit-problem [state :string policy :string permit :string signature :string now :i64
@@ -177,8 +179,101 @@
 (defn kg-sign [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
               last-sequence :i64 fence :i64 parent :string] :string
   (if (or (not= (vector-count seed) 32)
+          (= (kg-field policy 1) "funds")
           (not= (kg-permit-problem state policy permit signature now last-sequence fence parent) "")) ""
     (let [public (hex (public-from-seed seed))]
       (if (not= public (kg-field state 5)) ""
         (let [output (vector-alloc 64) result (sign-into output seed (kg-bytes (kg-permit-message permit)))]
           (if (= result 0) (hex output) ""))))))
+
+;; ---------------------------------------------------------------------------
+;; Funds role (JUN-501 S0-c, ADR 0021). A funds policy permits only the purpose
+;; en-transfer. Its author signature is NOT the action signature above: ENGI
+;; verifies a plain Ed25519 signature over the UTF-8 text of the transfer-id
+;; (engi.crypto/sign-transfer), so a funds permit is signed by kg-sign-transfer
+;; and kg-sign refuses it. The permit is the replay / fence / deadline /
+;; delegation gate exactly as for agents; its body digest must equal the
+;; SHA-256 of the canonical TransferBody built HERE from the request fields, so
+;; the delegate's signature commits to this one transfer and arbitrary bytes are
+;; never signed. Amount, receiver and recipient policy limits are S0-d.
+(defn kg-vzero [n :i64] :vector-i64
+  (let [v (vector-alloc n)] (loop [i 0] (if (>= i n) v (let [z (vector-assoc! v i 0)] (recur (+ i 1)))))))
+(defn kg-group [bytes :vector-i64 pos :i64 width :i64] :i64
+  (let [idx (quot pos 8) r (rem pos 8)
+        hi (vector-at bytes idx)
+        lo (if (< (+ idx 1) (vector-count bytes)) (vector-at bytes (+ idx 1)) 0)
+        v16 (+ (* hi 256) lo)]
+    (rem (quot v16 (i64-shift-left 1 (- (- 16 width) r))) (i64-shift-left 1 width))))
+(defn kg-b32 [bytes :vector-i64] :string
+  (let [n (quot (+ (* 8 (vector-count bytes)) 4) 5)]
+    (loop [k 0 out ""]
+      (if (>= k n) out
+        (let [g (kg-group bytes (* 5 k) 5)]
+          (recur (+ k 1) (string-concat out (string-substring "abcdefghijklmnopqrstuvwxyz234567" g (+ g 1)))))))))
+(defn kg-b64u [bytes :vector-i64] :string
+  (let [n (quot (+ (* 8 (vector-count bytes)) 5) 6)]
+    (loop [k 0 out ""]
+      (if (>= k n) out
+        (let [g (kg-group bytes (* 6 k) 6)]
+          (recur (+ k 1) (string-concat out (string-substring "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" g (+ g 1)))))))))
+(defn kg-b58-digits [bytes :vector-i64] :vector-i64
+  (let [digs (kg-vzero 96)]
+    (loop [i 0]
+      (if (>= i (vector-count bytes)) digs
+        (let [z (loop [j 0 carry (vector-at bytes i)]
+                  (if (>= j 96) 0
+                    (let [x (+ (* (vector-at digs j) 256) carry)
+                          w (vector-assoc! digs j (rem x 58))]
+                      (recur (+ j 1) (quot x 58)))))]
+          (recur (+ i 1)))))))
+(defn kg-b58 [bytes :vector-i64] :string
+  (let [digs (kg-b58-digits bytes)
+        top (loop [j 95] (if (< j 0) -1 (if (= (vector-at digs j) 0) (recur (- j 1)) j)))
+        lead (loop [i 0] (if (and (< i (vector-count bytes)) (= (vector-at bytes i) 0)) (recur (+ i 1)) i))
+        ones (loop [i 0 s ""] (if (>= i lead) s (recur (+ i 1) (string-concat s "1"))))]
+    (loop [j top out ones]
+      (if (< j 0) out
+        (let [g (vector-at digs j)]
+          (recur (- j 1) (string-concat out (string-substring "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" g (+ g 1)))))))))
+(defn kg-b58-char? [c :i64] :bool
+  (or (and (>= c 49) (<= c 57)) (and (>= c 65) (<= c 72)) (and (>= c 74) (<= c 78)) (and (>= c 80) (<= c 90))
+      (and (>= c 97) (<= c 107)) (and (>= c 109) (<= c 122))))
+;; did:key:z<base58btc> only; no space, newline or other character can reach the body
+(defn kg-did-key? [s :string] :bool
+  (and (>= (string-length s) 20) (<= (string-length s) 100)
+       (= (string-substring s 0 9) "did:key:z")
+       (loop [i 9] (if (= i (string-length s)) true
+                     (if (kg-b58-char? (string-code-point-at s i)) (recur (+ i 1)) false)))))
+(defn kg-did-of [public :string] :string
+  (let [m (kg-vzero 34) a (vector-assoc! m 0 237) b (vector-assoc! m 1 1)
+        pk (hex-bytes public)
+        c (loop [i 0] (if (>= i 32) 0 (let [z (vector-assoc! m (+ 2 i) (vector-at pk i))] (recur (+ i 1)))))]
+    (string-concat "did:key:z" (kg-b58 m))))
+;; every field is validated by the caller (kg-sign-transfer) before it is spliced in
+(defn kg-transfer-body [spender :string receiver :string amount :string spender-prev :string nonce :string ts :string] :string
+  (str "engi/transfer-body\nspender=" spender "\nreceiver=" receiver "\namount=" amount
+       "\nspender-prev=" spender-prev "\nnonce=" nonce "\nts=" ts "\n"))
+;; transfer-id = "b" + base32-lower(0x01 0x71 0x12 0x20 || SHA-256(body))
+(defn kg-transfer-id [body :string] :string
+  (let [h (sha256 (kg-bytes body)) cid (kg-vzero 36)
+        a (vector-assoc! cid 0 1) b (vector-assoc! cid 1 113) c (vector-assoc! cid 2 18) d (vector-assoc! cid 3 32)
+        e (loop [i 0] (if (>= i 32) 0 (let [z (vector-assoc! cid (+ 4 i) (vector-at h i))] (recur (+ i 1)))))]
+    (string-concat "b" (kg-b32 cid))))
+;; Output: base64url Ed25519 signature over the transfer-id text (the ENGI
+;; self-sig), or empty on any refusal. Persistence of replay state is the host's.
+(defn kg-sign-transfer [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
+                        last-sequence :i64 fence :i64 parent :string
+                        receiver :string amount :string spender-prev :string nonce :string ts :string] :string
+  (if (or (not= (vector-count seed) 32)
+          (not= (kg-field policy 1) "funds")
+          (not= (kg-field permit 4) "en-transfer")
+          (not= (kg-permit-problem state policy permit signature now last-sequence fence parent) "")) ""
+    (let [public (hex (public-from-seed seed))]
+      (if (not= public (kg-field state 5)) ""
+        (let [spender (kg-did-of public)]
+          (if (not (and (kg-did-key? receiver) (not= receiver spender) (> (kg-number amount) 0)
+                        (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? spender-prev))) ""
+            (let [body (kg-transfer-body spender receiver amount spender-prev nonce ts)]
+              (if (not= (kg-hash body) (kg-field permit 7)) ""
+                (let [output (kg-vzero 64) result (sign-into output seed (kg-bytes (kg-transfer-id body)))]
+                  (if (= result 0) (kg-b64u output) ""))))))))))

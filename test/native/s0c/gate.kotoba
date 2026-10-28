@@ -1,0 +1,39 @@
+(ns kagi.agent-signer-gate (:export [main]))
+(defn cg-report [name :string ok :bool] :i64
+  (let [out (typed-cap-call 37 :string :string (str (if ok "PASS " "FAIL ") name "\n"))] (if ok 1 0)))
+
+;; one funds request; every argument that a check varies is a parameter
+(defn cc [seed :vector-i64 state :string policy :string permit :string signature :string
+          now :i64 last :i64 receiver :string amount :string] :string
+  (kg-sign-transfer seed state policy permit signature now last 7 (kg-zero 64)
+                    receiver amount (kg-v "spender-prev") (kg-v "nonce") (kg-v "ts")))
+(defn cf [receiver :string amount :string now :i64 last :i64] :string
+  (cc (hex-bytes (kg-v "seed")) (kg-v "funds-state") (kg-v "funds-policy") (kg-v "funds-permit") (kg-v "funds-sig")
+      now last receiver amount))
+
+(defn main [] :i64
+  (let [good (cf (kg-v "receiver") (kg-v "amount") 2000 0)
+        seed (hex-bytes (kg-v "seed"))]
+    (+ (cg-report "funds policy is admitted" (= (kg-policy-problem (kg-v "funds-policy")) ""))
+    (+ (cg-report "en-transfer is not admitted for the agent role" (not (= (kg-policy-problem (kg-v "funds-policy-agent-role")) "")))
+    (+ (cg-report "funds role admits only en-transfer" (not (= (kg-policy-problem (kg-v "funds-policy-wrong-purpose")) "")))
+    (+ (cg-report "transfer signature equals ENGI's (base64url over transfer-id)" (= good (kg-v "sig-b64")))
+    (+ (cg-report "the signature is stable for the same request" (= good (cf (kg-v "receiver") (kg-v "amount") 2000 0)))
+    (+ (cg-report "transfer-id built in the signer equals ENGI's" (= (kg-transfer-id (kg-v "body")) (kg-v "tid")))
+    (+ (cg-report "did:key of the author equals the spender" (= (kg-did-of (kg-v "author")) (kg-v "spender")))
+    (+ (cg-report "kg-sign (action domain) refuses a funds permit" (= (kg-sign seed (kg-v "funds-state") (kg-v "funds-policy") (kg-v "funds-permit") (kg-v "funds-sig") 2000 0 7 (kg-zero 64)) ""))
+    (+ (cg-report "an agent-role permit cannot sign a transfer" (= (cc seed (kg-v "agent-state") (kg-v "agent-policy") (kg-v "agent-permit") (kg-v "agent-sig") 2000 0 (kg-v "receiver") (kg-v "amount")) ""))
+    (+ (cg-report "a changed amount is refused (body digest not committed by the permit)" (= (cf (kg-v "receiver") "8" 2000 0) ""))
+    (+ (cg-report "a receiver that smuggles a field is refused" (= (cf (str (kg-v "receiver") "\namount=1") (kg-v "amount") 2000 0) ""))
+    (+ (cg-report "a receiver that smuggles a field is refused even when the permit commits to that body" (= (cc seed (kg-v "funds-state") (kg-v "funds-policy") (kg-v "inj-permit") (kg-v "inj-sig") 2000 0 (kg-v "inj-receiver") (kg-v "amount")) ""))
+    (+ (cg-report "a receiver with a space is refused" (= (cf (str (kg-v "receiver") " x") (kg-v "amount") 2000 0) ""))
+    (+ (cg-report "a transfer to the spender itself is refused" (= (cf (kg-v "spender") (kg-v "amount") 2000 0) ""))
+    (+ (cg-report "a non did:key receiver is refused" (= (cf "someone" (kg-v "amount") 2000 0) ""))
+    (+ (cg-report "a zero amount is refused" (= (cf (kg-v "receiver") "0" 2000 0) ""))
+    (+ (cg-report "a non-canonical amount is refused" (= (cf (kg-v "receiver") "007" 2000 0) ""))
+    (+ (cg-report "a replayed sequence is refused" (= (cf (kg-v "receiver") (kg-v "amount") 2000 1) ""))
+    (+ (cg-report "an expired permit is refused" (= (cf (kg-v "receiver") (kg-v "amount") 30001 0) ""))
+    (+ (cg-report "a permit from the future is refused" (= (cf (kg-v "receiver") (kg-v "amount") 500 0) ""))
+    (+ (cg-report "a delegate signature over other text is refused" (= (cc seed (kg-v "funds-state") (kg-v "funds-policy") (kg-v "funds-permit") (kg-v "bad-sig") 2000 0 (kg-v "receiver") (kg-v "amount")) ""))
+    (+ (cg-report "a seed that is not the keyset author is refused" (= (cc (hex-bytes "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60") (kg-v "funds-state") (kg-v "funds-policy") (kg-v "funds-permit") (kg-v "funds-sig") 2000 0 (kg-v "receiver") (kg-v "amount")) ""))
+       (cg-report "a short seed is refused" (= (cc (hex-bytes "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f") (kg-v "funds-state") (kg-v "funds-policy") (kg-v "funds-permit") (kg-v "funds-sig") 2000 0 (kg-v "receiver") (kg-v "amount")) ""))))))))))))))))))))))))))
