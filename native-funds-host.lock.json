@@ -35,9 +35,9 @@
       "artifactSha256": "bcc4d722abc38c598713037000e893fe475c559a0b6a7c2b6e31687293a5ed16"
     },
     "s0c": {
-      "pass": 35,
+      "pass": 36,
       "fail": 0,
-      "artifactSha256": "8d30985f6d8cbe67037c638cf7a544b6bacc67b95774ee54dab27477fae419fd"
+      "artifactSha256": "410c71df50759d8e876a0420b573f98ab1d39fba33444175a8eff4d80e6793db"
     }
   },
   "hostGates": {

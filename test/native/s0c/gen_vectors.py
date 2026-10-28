@@ -112,6 +112,8 @@ fstate, fpermit, fsig = scenario(funds_policy, body)
 _, _, _, fpin, _ = keyset(funds_policy)
 body_cap = make_body(MAXAMT + 1)
 _, cap_permit, cap_sig = scenario(funds_policy, body_cap)
+# the same policy with the limits loosened (cap 1000 / daily 2000): the keyset does not pin it
+loose_policy = "kagi.agent.policy.v1 funds mon:funds hata:funds %s en-transfer 30000 1000 2000 %s" % (DELEGATE, sha(ALLOW_MAIN))
 other_policy = fpol(ALLOW_OTHER)
 other_state, other_permit, other_sig = scenario(other_policy, body)
 prefix_policy = fpol(ALLOW_PREFIX)
@@ -143,6 +145,7 @@ V = {
     "funds-policy": funds_policy, "funds-state": fstate, "funds-permit": fpermit, "funds-sig": fsig,
     "allow-main": ALLOW_MAIN, "allow-other": ALLOW_OTHER, "allow-prefix": ALLOW_PREFIX, "allow-forged": ALLOW_FORGED,
     "cap-amount": str(MAXAMT + 1), "cap-permit": cap_permit, "cap-sig": cap_sig,
+    "loose-policy": loose_policy,
     "other-policy": other_policy, "other-state": other_state, "other-permit": other_permit, "other-sig": other_sig,
     "prefix-policy": prefix_policy, "prefix-state": prefix_state, "prefix-permit": prefix_permit, "prefix-sig": prefix_sig,
     "agent-policy": apolicy, "agent-state": astate, "agent-permit": apermit, "agent-sig": asig,
