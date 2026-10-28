@@ -304,6 +304,26 @@ body.write_text('local cell operation digest fixture\n')
 run('permit-local', root, body, 'cell-action', expected=2)
 passed('funds and agent roots do not cross: no funds permit or signature from an agent root, no cell-action from a funds root')
 
+# ---- operator halt / kill switch (S0-f), on the bound funds3 root ----------------------------
+hline = request(funds3, RECEIVER, '1', 'nh', prev='nil', ts='5000')      # a valid permit, issued before the halt
+before3 = (funds3 / 'journal').read_bytes()
+assert json.loads(run('halt-local', funds3))['halted'] is True
+sign(funds3, hline, expected=2)
+request(funds3, RECEIVER, '1', 'nh2', prev='nil', ts='5001', expected=2)
+run('sign-binding-local', funds3, P[2], f3['author'], keyset_bundle(False)[0], expected=2)
+assert (funds3 / 'journal').read_bytes() == before3
+passed('after the operator halt no permit, signature or binding signature is issued, and the journal is untouched')
+assert json.loads(run('status-local', funds3))['sequence'] == 0
+run('audit-local', funds3)
+run('export-local', funds3)
+passed('read-only status, audit and export still work while halted, so a lost reply can still be resolved')
+run('halt-local', funds3, expected=2)
+passed('halting twice is refused: the host only ever creates the halt file')
+(funds3 / 'halt').unlink()                                               # the operator resumes, outside the host
+resumed = json.loads(sign(funds3, hline))
+assert resumed['sequence'] == 1 and openssl_verify(f3['author'], resumed['transferId'], resumed['signature'])
+passed('the same request signs once the operator removes the halt file, so the halt was the only thing refusing it')
+
 report = {'schema': 'kagi.native.funds-host.gate.v1', 'host': platform.machine(),
           'artifactSha256': hashlib.sha256(a.artifact.read_bytes()).hexdigest(),
           'passed': True, 'count': len(cases), 'cases': cases,
