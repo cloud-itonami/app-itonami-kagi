@@ -1,0 +1,82 @@
+(ns kagi.agent-signer-gate (:export [main]))
+(defn cg-report [name :string ok :bool] :i64
+  (let [out (typed-cap-call 37 :string :string (str (if ok "PASS " "FAIL ") name "\n"))] (if ok 1 0)))
+
+;; bytes[idx], or 0 past the end (zero padding bits)
+(defn cx-at [bytes :vector-i64 idx :i64] :i64
+  (if (< idx (vector-count bytes)) (vector-at bytes idx) 0))
+;; the width-bit group starting at bit position pos (width 5 or 6)
+(defn cx-group [bytes :vector-i64 pos :i64 width :i64] :i64
+  (let [idx (quot pos 8) r (rem pos 8)
+        v16 (+ (* (cx-at bytes idx) 256) (cx-at bytes (+ idx 1)))]
+    (rem (quot v16 (i64-shift-left 1 (- (- 16 width) r))) (i64-shift-left 1 width))))
+
+;; base32 lower, no padding (RFC 4648 alphabet, as kotobase.cid)
+(defn cx-b32 [bytes :vector-i64] :string
+  (let [n (quot (+ (* 8 (vector-count bytes)) 4) 5)]
+    (loop [k 0 out ""]
+      (if (>= k n) out
+        (let [g (cx-group bytes (* 5 k) 5)]
+          (recur (+ k 1) (string-concat out (string-substring "abcdefghijklmnopqrstuvwxyz234567" g (+ g 1)))))))))
+
+;; base64url, no padding
+(defn cx-b64u [bytes :vector-i64] :string
+  (let [n (quot (+ (* 8 (vector-count bytes)) 5) 6)]
+    (loop [k 0 out ""]
+      (if (>= k n) out
+        (let [g (cx-group bytes (* 6 k) 6)]
+          (recur (+ k 1) (string-concat out (string-substring "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" g (+ g 1)))))))))
+
+;; base58btc (Bitcoin alphabet), leading zero bytes become '1'
+(defn cx-zeros [n :i64] :vector-i64
+  (let [v (vector-alloc n)] (loop [i 0] (if (>= i n) v (let [z (vector-assoc! v i 0)] (recur (+ i 1)))))))
+(defn cx-b58-digits [bytes :vector-i64] :vector-i64
+  (let [digs (cx-zeros 96)]
+    (loop [i 0]
+      (if (>= i (vector-count bytes)) digs
+        (let [z (loop [j 0 carry (vector-at bytes i)]
+                  (if (>= j 96) 0
+                    (let [x (+ (* (vector-at digs j) 256) carry)
+                          w (vector-assoc! digs j (rem x 58))]
+                      (recur (+ j 1) (quot x 58)))))]
+          (recur (+ i 1)))))))
+(defn cx-top [digs :vector-i64] :i64
+  (loop [j 95] (if (< j 0) -1 (if (= (vector-at digs j) 0) (recur (- j 1)) j))))
+(defn cx-lead [bytes :vector-i64] :i64
+  (loop [i 0] (if (and (< i (vector-count bytes)) (= (vector-at bytes i) 0)) (recur (+ i 1)) i)))
+(defn cx-b58 [bytes :vector-i64] :string
+  (let [digs (cx-b58-digits bytes) top (cx-top digs) lead (cx-lead bytes)
+        ones (loop [i 0 s ""] (if (>= i lead) s (recur (+ i 1) (string-concat s "1"))))]
+    (loop [j top out ones]
+      (if (< j 0) out
+        (let [g (vector-at digs j)]
+          (recur (- j 1) (string-concat out (string-substring "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz" g (+ g 1)))))))))
+
+;; transfer-id = "b" + base32(0x01 0x71 0x12 0x20 || sha256(body))
+(defn cx-hdr [] :vector-i64
+  (let [v (cx-zeros 4) a (vector-assoc! v 0 1) b (vector-assoc! v 1 113) c (vector-assoc! v 2 18) d (vector-assoc! v 3 32)] v))
+(defn cx-tid [body :string] :string
+  (let [h (sha256 (vector-i64-from-bytes (string-to-utf8 body)))
+        cid (cx-zeros 36)
+        a (loop [i 0] (if (>= i 4) 0 (let [z (vector-assoc! cid i (vector-at (cx-hdr) i))] (recur (+ i 1)))))
+        b (loop [i 0] (if (>= i 32) 0 (let [z (vector-assoc! cid (+ 4 i) (vector-at h i))] (recur (+ i 1)))))]
+    (str "b" (cx-b32 cid))))
+(defn cx-did [pub :vector-i64] :string
+  (let [m (cx-zeros 34) a (vector-assoc! m 0 237) b (vector-assoc! m 1 1)
+        c (loop [i 0] (if (>= i 32) 0 (let [z (vector-assoc! m (+ 2 i) (vector-at pub i))] (recur (+ i 1)))))]
+    (str "did:key:z" (cx-b58 m))))
+(defn cx-sig [seed :vector-i64 text :string] :string
+  (let [out (cx-zeros 64) r (sign-into out seed (vector-i64-from-bytes (string-to-utf8 text)))] (cx-b64u out)))
+
+(defn cx-case [i :string] :i64
+  (let [seed (hex-bytes (kg-v "seed")) body (kg-v (str "body-" i)) tid (cx-tid body)
+        tampered (cx-tid (str body "x"))]
+    (+ (cg-report (str "case " i " transfer-id derived natively equals ENGI") (= tid (kg-v (str "tid-" i))))
+    (+ (cg-report (str "case " i " base64url Ed25519 signature equals ENGI") (= (cx-sig seed (kg-v (str "tid-" i))) (kg-v (str "sig-b64-" i))))
+       (cg-report (str "case " i " altered body gives another transfer-id") (not (= tampered (kg-v (str "tid-" i)))))))))
+
+(defn main [] :i64
+  (let [seed (hex-bytes (kg-v "seed"))]
+    (+ (cg-report "did:key derived natively equals ENGI" (= (cx-did (public-from-seed seed)) (kg-v "did")))
+    (+ (cg-report "base58 keeps a leading zero byte as 1" (= (cx-b58 (hex-bytes "0000ff")) "115Q"))
+    (+ (cx-case "0") (cx-case "1"))))))
