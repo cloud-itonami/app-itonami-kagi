@@ -88,6 +88,15 @@
           (recur (+ end 1)
                  (if (and (= (kg-field line 0) "kagi.host.fentry.v1") (= (kh-day (kg-number (kg-field line 1))) today))
                    (+ total (kg-number (kg-field line 19))) total)))))))
+;; The binding file is the binding line, LF, then the verified identity keyset
+;; bundle. It is re-verified on every funds operation, so a damaged or swapped
+;; file stops signing instead of being trusted from creation time.
+(defn kh-bound? [root :string state :string] :bool
+  (let [text (kh-read root "binding") end (kc-line-end text 0)]
+    (and (> (string-length text) 0) (< (+ end 1) (string-length text))
+         (let [binding (string-substring text 0 end)
+               bundle (string-substring text (+ end 1) (string-length text))]
+           (= (kg-binding-problem binding (kc-verify-bundle bundle (kg-field binding 3)) (kg-field state 5)) "")))))
 (defn kh-ready? [state :string policy :string cursor :string] :bool
   (and (= (kg-state-problem state) "") (= (kg-field state 4) "active")
        (= (kg-policy-problem policy) "") (= (kg-hash policy) (kg-field state 6))
@@ -195,6 +204,26 @@
                   (kc-output (str "{\"schema\":\"kagi.host.signature.v1\",\"mode\":\"local-software\",\"sequence\":" (kg-field permit 10)
                     ",\"author\":\"" (kg-field state 5) "\",\"permit\":\"" permit "\",\"delegateSignature\":\"" delegate
                     "\",\"signature\":\"" signature "\",\"journalHead\":\"" (kg-hash entry) "\"}\n")))))))
+        ;; Binding (S0-e). sign-binding-local signs ONLY the binding statement, in
+        ;; the domain of the role this root's author plays in it; it is not a
+        ;; general signing oracle. bind-local verifies and records the binding once.
+        (= command "sign-binding-local")
+          (let [idpub (kc-arg 2) fpub (kc-arg 3) pin (kc-arg 4)
+                statement (str "kagi.funds.binding.v1 " idpub " " fpub " " pin)
+                role (cond (= (kg-field state 5) idpub) "identity" (= (kg-field state 5) fpub) "funds" :else "")]
+            (if (or (= role "") (not (kg-public? idpub)) (not (kg-public? fpub)) (= idpub fpub) (not (kg-hex? pin 64)))
+              (kc-error "binding sign refused")
+              (kc-output (str (kh-sign-text (kh-read root "author.seed") (kg-binding-message role statement)) "\n"))))
+        (= command "bind-local")
+          (let [text (typed-cap-call 35 :string :string (kc-arg 2))
+                binding (string-substring text 0 (kc-line-end text 0))
+                bundle (typed-cap-call 35 :string :string (kc-arg 3))]
+            (if (or (not= (kg-field policy 1) "funds") (not= (+ (kc-line-end text 0) 1) (string-length text))
+                    (not= (kg-binding-problem binding (kc-verify-bundle bundle (kg-field binding 3)) (kg-field state 5)) "")
+                    (not (kh-create root "binding" (str binding "\n" bundle))))
+              (kc-error "binding refused")
+              (kc-output (str "{\"schema\":\"kagi.host.binding.v1\",\"identity\":\"" (kg-field binding 1) "\",\"funds\":\"" (kg-field binding 2)
+                              "\",\"identityKeyset\":\"" (kg-field binding 3) "\"}\n"))))
         ;; Funds (S0-c2). permit-funds-local builds the canonical TransferBody
         ;; itself from the request fields, checks the pinned limits against the
         ;; verified journal, and has the delegate sign a permit committing to that
@@ -209,7 +238,7 @@
                          " " (kg-field cursor 3) " " (kg-field config 3) " " (+ (kg-number (kg-field cursor 1)) 1)
                          " " now " " (+ now (kg-number (kg-field policy 6))))
                 signature (kh-sign-text (kh-read root "delegate.seed") permit)]
-            (if (or (not= (kg-field policy 1) "funds") (not (kg-did-key? receiver)) (= receiver spender)
+            (if (or (not= (kg-field policy 1) "funds") (not (kh-bound? root state)) (not (kg-did-key? receiver)) (= receiver spender)
                     (not (and (> (kg-number amount) 0) (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? sprev)))
                     (not (kg-funds-limits-ok? policy receiver (kg-number amount) (kh-read root "allowlist") spent))
                     (not= (kg-permit-problem state policy permit signature now (kg-number (kg-field cursor 1))
@@ -225,7 +254,7 @@
                 receiver (kg-field line 14) amount (kg-field line 15) sprev (kg-field line 16)
                 nonce (kg-field line 17) ts (kg-field line 18)
                 spent (kh-spent journal config (kh-day now))
-                signature (if (and shaped (= (kg-field policy 1) "funds"))
+                signature (if (and shaped (= (kg-field policy 1) "funds") (kh-bound? root state))
                   (kg-sign-transfer-hex (hex-bytes (kh-read root "author.seed")) state policy permit delegate now
                     (kg-number (kg-field cursor 1)) (kg-number (kg-field config 3)) (kg-field cursor 3)
                     receiver amount sprev nonce ts (kh-read root "allowlist") spent) "")]
@@ -254,7 +283,9 @@
                 (kh-watch root directory count)))
           (and (or (= command "status-local") (= command "export-local") (= command "audit-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
           (and (= command "permit-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 4) "")) (kh-operate command root)
+          (and (= command "sign-binding-local") (not= root "") (not= (kc-arg 4) "") (= (kc-arg 5) "")) (arena-scope (kh-operate command root))
+          (and (= command "bind-local") (not= root "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
           (and (= command "permit-funds-local") (not= root "") (not= (kc-arg 6) "") (= (kc-arg 7) "")) (arena-scope (kh-operate command root))
           (and (= command "sign-funds-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-operate command root))
           (and (or (= command "sign-local") (= command "sign-local-line")) (not= root "") (not= (kc-arg 2) "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
-          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local; no legacy keys"))))
+          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local; no legacy keys"))))

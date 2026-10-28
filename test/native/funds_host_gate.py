@@ -95,6 +95,115 @@ def body_of(receiver, amount, prev, nonce, ts):
 
 
 journal = lambda: (root / 'journal').read_bytes()
+
+
+# ---- identity <-> funds binding (S0-e) ------------------------------------------
+def ed_sign(seed_hex, msg):
+    d = Path(tempfile.mkdtemp(dir=out))
+    der = bytes.fromhex('302e020100300506032b657004220420') + bytes.fromhex(seed_hex)
+    (d / 'k.pem').write_text('-----BEGIN PRIVATE KEY-----\n' + base64.b64encode(der).decode() + '\n-----END PRIVATE KEY-----\n')
+    (d / 'm').write_bytes(msg.encode())
+    sig = subprocess.check_output(['openssl', 'pkeyutl', '-sign', '-inkey', str(d / 'k.pem'), '-rawin', '-in', str(d / 'm')])
+    pub = subprocess.check_output(['openssl', 'pkey', '-in', str(d / 'k.pem'), '-pubout', '-outform', 'DER'])[-32:]
+    return sig.hex(), pub.hex()
+
+
+def sha(t):
+    return hashlib.sha256(t.encode()).hexdigest()
+
+
+idroot, other, funds2, funds3 = out / 'identity', out / 'other', out / 'funds2', out / 'funds3'
+for d in (idroot, other, funds2, funds3):
+    d.mkdir(mode=0o700)
+idinfo = json.loads(run('init-local', idroot, 'agent', 'cell:identity', 'hata:local', 'cell-writes', '60000'))
+oinfo = json.loads(run('init-local', other, 'agent', 'cell:other', 'hata:local', 'cell-writes', '60000'))
+f2 = json.loads(run('init-local', funds2, 'funds', 'mon:funds', 'hata:funds', 'en-transfer', '60000', '10', '20', allow))
+f3 = json.loads(run('init-local', funds3, 'funds', 'mon:funds', 'hata:funds', 'en-transfer', '60000', '10', '20', allow))
+id_pub, id_pin, o_pub = idinfo['author'], idinfo['genesis'], oinfo['author']
+bundle_file = out / 'identity.bundle'
+bundle_file.write_text(run('export-local', idroot).split('\n')[2] + '\n')
+Z = '0' * 128
+
+
+def sig_of(r, idp, fp, pin, expected=0):
+    return run('sign-binding-local', r, idp, fp, pin, expected=expected).strip()
+
+
+def binding_line(idp, fp, pin, isig, fsig):
+    return ' '.join(['kagi.funds.binding.v1', idp, fp, pin, isig, fsig]) + '\n'
+
+
+def try_bind(line, bundle=bundle_file, r=root, expected=0):
+    f = out / 'binding'
+    f.write_text(line)
+    return run('bind-local', r, f, bundle, expected=expected)
+
+
+request(root, RECEIVER, '7', 'n0', expected=2)
+passed('an unbound funds root issues no permit')
+
+run('sign-binding-local', root, id_pub, o_pub, id_pin, expected=2)    # this root is neither party
+run('sign-binding-local', idroot, id_pub, author, 'zz', expected=2)    # pin is not 64 hex
+run('sign-binding-local', idroot, id_pub, id_pub, id_pin, expected=2)  # same key on both sides
+passed('sign-binding-local signs only a well-formed statement in which this root is a party')
+
+isig, fsig = sig_of(idroot, id_pub, author, id_pin), sig_of(root, id_pub, author, id_pin)
+assert isig != fsig
+try_bind(binding_line(id_pub, author, id_pin, Z, fsig), expected=2)
+try_bind(binding_line(id_pub, author, id_pin, isig, Z), expected=2)
+try_bind(' '.join(['kagi.funds.binding.v1', id_pub, author, id_pin, isig]) + '\n', expected=2)
+passed('a binding missing either signature, or with a missing field, is refused')
+try_bind(binding_line(id_pub, author, id_pin, fsig, isig), expected=2)
+passed('swapped signatures are refused: the two roles sign different domains')
+
+# a binding for a different funds key (signed by both of its parties) cannot be installed here
+osig = sig_of(other, id_pub, o_pub, id_pin)
+try_bind(binding_line(id_pub, o_pub, id_pin, sig_of(idroot, id_pub, o_pub, id_pin), osig), expected=2)
+passed('a binding for another funds key is refused (different DID)')
+# an "identity" key that is not the author of the identity keyset it pins
+try_bind(binding_line(o_pub, author, id_pin, sig_of(other, o_pub, author, id_pin), sig_of(root, o_pub, author, id_pin)), expected=2)
+passed('an identity key that is not the author of the pinned identity keyset is refused')
+
+# a revoked identity keyset (oracle-built from public RFC 8032 seeds), with an active control
+S = ['9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60',
+     '4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb',
+     'c5aa8df43f9f837bedb7442f31dcb7b166d38535076f094b85ce3a2e0b4458f7']
+P = [ed_sign(x, 'x')[1] for x in S]
+guards, pol = ''.join(P), sha('fixture identity policy')
+
+
+def keyset_bundle(revoked):
+    ev = ' '.join(['kagi.keyset.event.v1', 'genesis', '0', '0' * 64, P[2], pol, guards, '2'])
+    man = ed_sign(S[0], 'kagi.keyset.manage.v1\n' + ev)[0] + ed_sign(S[1], 'kagi.keyset.manage.v1\n' + ev)[0] + '0' * 128
+    text = ev + ' ' + man + ' ' + ed_sign(S[2], 'kagi.keyset.author.v1\n' + ev)[0] + '\n'
+    if revoked:
+        rv = ' '.join(['kagi.keyset.event.v1', 'revoke', '1', sha(ev), P[2], pol, guards, '2'])
+        rman = ed_sign(S[0], 'kagi.keyset.manage.v1\n' + rv)[0] + ed_sign(S[1], 'kagi.keyset.manage.v1\n' + rv)[0] + '0' * 128
+        text += rv + ' ' + rman + ' ' + Z + '\n'
+    return sha(ev), text
+
+
+for revoked, target, info in ((True, root, None), (False, funds3, f3)):
+    pin, text = keyset_bundle(revoked)
+    bf = out / ('rfc-revoked.bundle' if revoked else 'rfc-active.bundle')
+    bf.write_text(text)
+    fpub = author if revoked else info['author']
+    stmt = 'kagi.funds.binding.v1 %s %s %s' % (P[2], fpub, pin)
+    line = binding_line(P[2], fpub, pin, ed_sign(S[2], 'kagi.funds.binding.identity.v1\n' + stmt)[0], sig_of(target, P[2], fpub, pin))
+    if revoked:
+        try_bind(line, bundle=bf, expected=2)
+    else:
+        try_bind(line, bundle=bf, r=funds3)
+passed('a binding to a revoked identity keyset is refused, while the same construction on an active one is accepted')
+
+line = binding_line(id_pub, author, id_pin, isig, fsig)
+bound = json.loads(try_bind(line))
+assert bound['identity'] == id_pub and bound['funds'] == author and bound['identityKeyset'] == id_pin
+passed('a mutually signed binding to an active identity keyset is verified and recorded')
+try_bind(line, expected=2)
+passed('a funds root is bound once: a second bind is refused')
+try_bind(line, r=funds2, expected=2)
+passed('the same binding cannot be installed on another funds root')
 request(root, STRANGER, '1', 'n0', expected=2)
 request(root, RECEIVER, '11', 'n0', expected=2)
 request(root, RECEIVER, '0', 'n0', expected=2)
@@ -126,6 +235,19 @@ passed('changing the amount after the permit was issued is refused')
 status = json.loads(run('status-local', root))
 assert status['sequence'] == 1
 passed('a restart replays the funds journal and recovers the sequence')
+
+# the binding is re-verified on every funds operation. The same request succeeds with the
+# intact binding (so the limits are not what refuses it) and fails with a damaged one.
+saved_binding = (root / 'binding').read_text()
+request(root, RECEIVER, '1', 'nt', prev=r1['transferId'], ts='1500')
+head, rest = saved_binding.split('\n', 1)
+fields = head.split(' ')
+fields[5] = ('0' if fields[5][0] != '0' else '1') + fields[5][1:]
+(root / 'binding').write_text(' '.join(fields) + '\n' + rest)
+request(root, RECEIVER, '1', 'nt', prev=r1['transferId'], ts='1500', expected=2)
+(root / 'binding').write_text(saved_binding)
+request(root, RECEIVER, '1', 'nt', prev=r1['transferId'], ts='1500')
+passed('a damaged binding file stops funds operations instead of being trusted from creation time')
 
 line2 = request(root, OTHER, '7', 'n1', prev=r1['transferId'], ts='2000')
 r2 = json.loads(sign(root, line2))

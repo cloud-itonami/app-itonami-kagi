@@ -1,4 +1,4 @@
-# Native funds role (JUN-501 S0-c, S0-d and S0-c2, ADR 0021)
+# Native funds role (JUN-501 S0-c, S0-d, S0-c2 and S0-e, ADR 0021)
 
 The pure core (`kotoba/kagi/agent_signer.kotoba`) gains a third policy role,
 `funds`, with exactly one purpose, `en-transfer`:
@@ -96,6 +96,46 @@ sign-funds-local ROOT REQUEST_FILE
   caller input. A funds root has no agent path, and an agent root has no funds
   path.
 
+## Identity binding (S0-e)
+
+A funds key counts as a bot's funds key only if its identity key vouches for it
+and it vouches for the identity:
+
+```
+kagi.funds.binding.v1 IDENTITY_PUB FUNDS_PUB IDENTITY_KEYSET_PIN IDENTITY_SIG FUNDS_SIG
+```
+
+The statement is the first four fields. The identity key signs
+`kagi.funds.binding.identity.v1\n` + statement; the funds key signs
+`kagi.funds.binding.funds.v1\n` + statement. Both prefixes differ from the
+agent action domain and from a transfer-id, so a binding signature is neither
+usable as another kind of signature nor swappable between the two roles.
+
+`kg-binding-problem` accepts the binding only if all of these hold: six
+well-formed fields; two different public keys; an identity keyset state derived
+from a verified bundle (`kc-verify-bundle`, pinned by the 64-hex genesis in the
+statement) that is **active**, whose genesis equals the pin and whose author
+equals `IDENTITY_PUB`; `FUNDS_PUB` equals this funds keyset's author; and both
+signatures verify. Refusal reasons are named (`binding/identity-revoked`,
+`binding/identity-key`, `binding/funds-key`, `binding/identity-signature`, ...).
+
+Host commands:
+
+```
+sign-binding-local ROOT IDENTITY_PUB FUNDS_PUB IDENTITY_KEYSET_PIN
+bind-local FUNDS_ROOT BINDING_FILE IDENTITY_BUNDLE_FILE
+```
+
+`sign-binding-local` signs only a well-formed binding statement, in the domain
+of the role this root's author plays in it (identity or funds); it refuses
+when this root is neither party, when the pin is not 64 hex, or when both keys
+are the same. It is not a general signing oracle and writes nothing to the
+journal. `bind-local` verifies the binding and the bundle and records them in
+one exclusive create (`binding` = the binding line, LF, the bundle), so a funds
+root is bound once and a binding cannot be installed on another root.
+`permit-funds-local` and `sign-funds-local` **re-verify the stored binding on
+every call** and refuse when it is missing or damaged.
+
 ## Evidence (2026-10-28, this source, pinned compiler and owners)
 
 Same pinned `amu-root` and owner sources as the host lock, in the existing
@@ -134,6 +174,23 @@ first reproduces the pinned agent genesis digest and proof).
   refuses 14 + 7, signs 14 + 6 and refuses one more; lowering a journalled
   amount breaks the proof; a bad journalled author signature on the last entry
   breaks the proof; funds and agent roots do not cross.
+- Binding (S0-e): the host gate now has 26 cases. Before binding no permit is
+  issued; `sign-binding-local` refuses a root that is neither party, a bad pin
+  and identical keys; a binding missing either signature or a field is
+  refused; swapped signatures are refused; a binding for another funds key is
+  refused; an identity key that is not the author of the pinned identity
+  keyset is refused; a binding to a revoked identity keyset is refused while
+  the same construction on an active one (oracle-built from public RFC 8032
+  seeds) is accepted; a valid binding is recorded once and cannot be reinstalled
+  or installed on another funds root; and a damaged `binding` file stops funds
+  operations (the same request succeeds with the intact file).
+- Binding mutations, each failing only the case that guards it: dropping the
+  identity-revoked, funds-key, identity-key, identity-signature or
+  funds-signature check; not requiring the binding in `permit-funds-local`; not
+  re-verifying the stored binding. The last one was missed at first because the
+  case sat after the daily cap was reached, where the cap refused the request
+  anyway; it now runs while limits allow the request, with the intact file as a
+  positive control.
 - Host mutations: ignoring the journal for `spent` fails the daily-cap case;
   not verifying a journalled signature fails the signature case (first version
   tampered a non-final entry, which the prev-hash link also catches, so the case
@@ -143,16 +200,20 @@ first reproduces the pinned agent genesis digest and proof).
 
 - `native-local-host.lock.json` still pins the JUN-299 build. A host built from
   this source has SHA-256
-  `f32f4efb28f0b4379d1bd693b30429569469d67fccbca6c2a4b44dfc5ab854e7`. The lock
+  `5087e684f855641bd13c4a9f687e049d5beb44f4453c1b875beb44c795d032c0`. The lock
   and the qualification receipts are not refreshed here; that is S0-g.
+- The identity keyset is read from the bundle given at bind time. A revocation
+  of the identity keyset after binding is not observed until a fresher bundle
+  is supplied; there is no command for that yet, and distributed keyset-head
+  freshness is JUN-300. Rotating a binding means a new funds root.
 - The window is the UTC day taken from the host's wall clock; the journal makes
   a clock rollback visible but there is no independent time source.
-- The mutual binding with the identity keyset (S0-e) and process isolation /
-  kill switch measurements (S0-f) are not implemented. Nothing submits a signed
+- Process isolation / kill switch measurements (S0-f) are not done: nothing
+  here shows that another OS user cannot read the seeds, and the revoke path
+  (a guardian-signed event) has no host command. Nothing submits a signed
   transfer to ENGI, and the counterparty's `counter-sig` is not produced here.
-- Not custody evidence: public test seeds are not used in the host gate (it
-  draws fresh native entropy), but it runs on a development VM with one
-  administrator and no independent guardian. The host remains
-  `independentCustody=false`, `productionQualified=false`. The limit values in
-  the vectors and gate (10 per transaction, 20 per day) are test values; real
-  values are governed grants (JUN-527), not decided by an agent.
+- Not custody evidence: the host gate draws fresh native entropy, but runs on a
+  development VM with one administrator and no independent guardian. The host
+  remains `independentCustody=false`, `productionQualified=false`. The limit
+  values in the vectors and gate (10 per transaction, 20 per day) are test
+  values; real values are governed grants (JUN-527), not decided by an agent.
