@@ -1,0 +1,17 @@
+(require '[engi.crypto :as c])
+(defn hex->u8 [h] (js/Uint8Array.from (map #(js/parseInt (apply str %) 16) (partition 2 h))))
+(def s1 (c/identity-from-seed (hex->u8 "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60")))
+(def s2 (c/identity-from-seed (hex->u8 "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")))
+(println "spender" (:did s1)) (println "receiver" (:did s2))
+(doseq [[amt prev n ts] [[1 "nil" "n0" 1000] [15 "bafy-prev" "n1" 2000]]]
+  (let [b {:spender (:did s1) :receiver (:did s2) :amount amt :spender-prev prev :nonce n :ts ts}
+        r (c/sign-transfer b (:secret-key s1))]
+    (println (:transfer-id r) (:sig r) (c/verify-transfer-id-sig (:transfer-id r) (:sig r) (:did s1)))))
+;; negative controls
+(let [b {:spender (:did s1) :receiver (:did s2) :amount 1 :spender-prev "nil" :nonce "n0" :ts 1000}
+      r (c/sign-transfer b (:secret-key s1))
+      b2 (assoc b :amount 2)
+      r2 (c/sign-transfer b2 (:secret-key s1))]
+  (println "neg tampered-amount-differs" (not= (:transfer-id r) (:transfer-id r2)))
+  (println "neg sig-over-other-id" (c/verify-transfer-id-sig (:transfer-id r2) (:sig r) (:did s1)))
+  (println "neg wrong-did" (c/verify-transfer-id-sig (:transfer-id r) (:sig r) (:did s2))))

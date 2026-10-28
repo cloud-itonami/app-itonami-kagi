@@ -1,0 +1,31 @@
+{
+ "purpose": "interop vectors for kagi funds-role S0 (JUN-501); public RFC 8032 seeds, never operational",
+ "signs": "Ed25519 over the UTF-8 bytes of transfer-id (engi.crypto/sign-transfer)",
+ "transfer-id": "b + base32-lower(0x01 0x71 0x12 0x20 || sha256(canonical-transfer-body))",
+ "did-key": "did:key:z + base58btc(0xed 0x01 || pub32)",
+ "seeds": {
+  "spender": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "receiver": "4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb"
+ },
+ "dids": {
+  "spender": "did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw",
+  "receiver": "did:key:z6MkiaMbhXHNA4eJVCCj8dbzKzTgYDKf6crKgHVHid1F1WCT"
+ },
+ "cases": [
+  {
+   "body": "engi/transfer-body\nspender=did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\nreceiver=did:key:z6MkiaMbhXHNA4eJVCCj8dbzKzTgYDKf6crKgHVHid1F1WCT\namount=1\nspender-prev=nil\nnonce=n0\nts=1000\n",
+   "transfer-id": "bafyreiatc7bhtomw5st77mhor5qinxnesckbxjgqkm3p7ss7m4a6tywox4",
+   "sig-b64url": "SE-MLateJepdSy9bJcbLsvlbLaL0RK1X4B-ZcJvoF2nXvyQ-tB9uef4Z0aOrmO5AEQEsuCyoVPJxSaFsY2FyAw"
+  },
+  {
+   "body": "engi/transfer-body\nspender=did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\nreceiver=did:key:z6MkiaMbhXHNA4eJVCCj8dbzKzTgYDKf6crKgHVHid1F1WCT\namount=15\nspender-prev=bafy-prev\nnonce=n1\nts=2000\n",
+   "transfer-id": "bafyreib2ys4uqv2pjmciu7fddivixryf4yb3amygdohekqu7pk3x7ojiay",
+   "sig-b64url": "_vRCO3FTC7INwSwx5Ty012TYHWB0Fzz1h5HwyPka5XRQNhh9q6LnCsbnSRrQ3Thzp0p9ATdB-pU8B5ADcSXsBQ"
+  }
+ ],
+ "negative": [
+  "a different amount yields a different transfer-id",
+  "a signature over one transfer-id does not verify for another",
+  "a signature does not verify under the receiver did:key"
+ ]
+}
