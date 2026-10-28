@@ -156,12 +156,26 @@
                 (not (kh-create root "config" config)))
           (kc-error "private create/init refused; existing or partial stores are never overwritten")
           (kc-output (str "{\"schema\":\"kagi.host.init.v1\",\"mode\":\"local-software\",\"independentCustody\":false,\"genesis\":\"" pin "\",\"author\":\"" public "\",\"delegate\":\"" dp "\"}\n")))))))
+;; halt-local is deliberately independent of keyset/journal state, so it still
+;; works when the rest of the root is unreadable. It is an exclusive create:
+;; the host never removes the file (resuming is the operator's OS-level act).
+(defn kh-halt [root :string] :i64
+  (if (kh-create root "halt" (str (kh-now) " halted by operator"))
+    (kc-output "{\"schema\":\"kagi.host.halt.v1\",\"halted\":true}\n")
+    (kc-error "halt refused (already halted, or the root is unavailable)")))
 (defn kh-operate [command :string root :string] :i64
   (let [config (kh-read root "config") state (kh-state root config)
         policy (kh-read root "policy") journal (kh-read root "journal")
         cursor (kh-cursor journal config state policy) now (kh-now)]
-    (if (or (not (kh-ready? state policy cursor)) (< now (kg-number (kg-field cursor 2))))
-      (kc-error "host state/proof/journal/clock refused")
+    (cond
+      (or (not (kh-ready? state policy cursor)) (< now (kg-number (kg-field cursor 2))))
+        (kc-error "host state/proof/journal/clock refused")
+      ;; Operator halt (S0-f). A halt file stops every permit and signature; the
+      ;; read-only commands keep working so a lost reply can still be resolved.
+      (and (not= (kh-read root "halt") "")
+           (not (or (= command "status-local") (= command "export-local") (= command "audit-local"))))
+        (kc-error "host halted by operator; no permit or signature is issued")
+      :else
       (cond
         (= command "export-local")
           (kc-output (str config "\n" policy "\n" (kh-read root "keyset.bundle")))
@@ -283,9 +297,10 @@
                 (kh-watch root directory count)))
           (and (or (= command "status-local") (= command "export-local") (= command "audit-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
           (and (= command "permit-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 4) "")) (kh-operate command root)
+          (and (= command "halt-local") (not= root "") (= (kc-arg 2) "")) (arena-scope (kh-halt root))
           (and (= command "sign-binding-local") (not= root "") (not= (kc-arg 4) "") (= (kc-arg 5) "")) (arena-scope (kh-operate command root))
           (and (= command "bind-local") (not= root "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
           (and (= command "permit-funds-local") (not= root "") (not= (kc-arg 6) "") (= (kc-arg 7) "")) (arena-scope (kh-operate command root))
           (and (= command "sign-funds-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-operate command root))
           (and (or (= command "sign-local") (= command "sign-local-line")) (not= root "") (not= (kc-arg 2) "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
-          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local; no legacy keys"))))
+          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local | halt-local; no legacy keys"))))

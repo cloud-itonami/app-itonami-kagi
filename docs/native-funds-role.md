@@ -1,4 +1,4 @@
-# Native funds role (JUN-501 S0-c, S0-d, S0-c2 and S0-e, ADR 0021)
+# Native funds role (JUN-501 S0-c, S0-d, S0-c2, S0-e and S0-f, ADR 0021)
 
 The pure core (`kotoba/kagi/agent_signer.kotoba`) gains a third policy role,
 `funds`, with exactly one purpose, `en-transfer`:
@@ -136,6 +136,35 @@ root is bound once and a binding cannot be installed on another root.
 `permit-funds-local` and `sign-funds-local` **re-verify the stored binding on
 every call** and refuse when it is missing or damaged.
 
+## Kill switch and isolation (S0-f)
+
+`halt-local ROOT` creates the file `halt` in the private root (exclusive create,
+so a second call is refused; the host never removes it). While it exists, every
+`permit-*`, `sign-*`, `sign-binding-local` and `bind-local` is refused, while
+`status-local`, `export-local` and `audit-local` keep working, so a lost reply
+can still be resolved. It does not depend on the keyset or journal being
+readable. Resuming is the operator's OS-level act (removing the file). This is
+an operator-local stop; it is **not** a guardian-signed revocation of the
+keyset, which other parties could verify (see Not established).
+
+`test/native/isolation_gate.py` measures what the host actually enforces, on a
+local filesystem (a shared mount does not reflect Linux ownership), as the host's
+own user with `sudo -n -u nobody` for the other user:
+
+- the operator creates the root 0700; the host refuses a root that is not
+  owner-only (0755) and creates nothing in it;
+- every file the host creates (the three seeds, policy, config, bundle,
+  journal, allowlist) is 0600;
+- `nobody` cannot read a seed or list the root, cannot run `status-local`,
+  `export-local`, `audit-local` or `init-local` against it, and the journal is
+  unchanged;
+- the host user itself, without the capability grant (`KEXE_CAP_RESOURCES_35`)
+  for the root, cannot read, audit or halt it;
+- initialising an existing root is refused and no seed changes;
+- no command output (init, status, export, audit, halt, refusals) contains any
+  seed. The author, guardian and delegate seeds are separate files, and routine
+  signing reads only the author seed.
+
 ## Evidence (2026-10-28, this source, pinned compiler and owners)
 
 Same pinned `amu-root` and owner sources as the host lock, in the existing
@@ -191,7 +220,17 @@ first reproduces the pinned agent genesis digest and proof).
   case sat after the daily cap was reached, where the cap refused the request
   anyway; it now runs while limits allow the request, with the intact file as a
   positive control.
-- Host mutations: ignoring the journal for `spent` fails the daily-cap case;
+- S0-f: the funds host gate gains 4 cases on the bound `funds3` root (no permit,
+  signature or binding signature after the halt and the journal untouched;
+  status, audit and export still work; a second halt is refused; the same
+  request signs once the operator removes the file) and the isolation gate
+  passes (all cases, receipt with the measured modes). Sensitivity: widening
+  the modes after init makes the isolation gate fail (`--loosen`); removing the
+  halt check in the host makes the funds gate fail on the signature after the
+  halt. The isolation checks rest on the host's private-create capability, which
+  is not in this source, so they are measurements of the pinned build, not
+  mutations of it.
+- Host mutations: ignoring the journal for `spent`- Host mutations: ignoring the journal for `spent` fails the daily-cap case;
   not verifying a journalled signature fails the signature case (first version
   tampered a non-final entry, which the prev-hash link also catches, so the case
   now targets the last entry).
@@ -200,18 +239,26 @@ first reproduces the pinned agent genesis digest and proof).
 
 - `native-local-host.lock.json` still pins the JUN-299 build. A host built from
   this source has SHA-256
-  `5087e684f855641bd13c4a9f687e049d5beb44f4453c1b875beb44c795d032c0`. The lock
-  and the qualification receipts are not refreshed here; that is S0-g.
+  `736081c9bf97ac0acfb1ed29bf96acc465c13a016f8bce13fdef66396e8d7073` (rebuilt
+  twice with the same digest). The lock and the qualification receipts are not
+  refreshed here; that is S0-g.
+- There is no host command for a guardian-signed `revoke`. The halt is local to
+  one root and removable by whoever controls the OS account; it is not
+  something an ENGI verifier or another party can see. The pure verifier can
+  check a revoke event, but advancing a root's head (the config pins the head)
+  and publishing the revocation need design work.
+- Isolation was measured against an unprivileged local user (`nobody`) and the
+  capability grant, on one VM. The host administrator (root) can read every
+  seed, there is no independent guardian, and secret-memory erasure and
+  side-channel behaviour of the pinned Ed25519 are not qualified.
 - The identity keyset is read from the bundle given at bind time. A revocation
   of the identity keyset after binding is not observed until a fresher bundle
   is supplied; there is no command for that yet, and distributed keyset-head
   freshness is JUN-300. Rotating a binding means a new funds root.
 - The window is the UTC day taken from the host's wall clock; the journal makes
   a clock rollback visible but there is no independent time source.
-- Process isolation / kill switch measurements (S0-f) are not done: nothing
-  here shows that another OS user cannot read the seeds, and the revoke path
-  (a guardian-signed event) has no host command. Nothing submits a signed
-  transfer to ENGI, and the counterparty's `counter-sig` is not produced here.
+- Nothing submits a signed transfer to ENGI, and the counterparty's
+  `counter-sig` is not produced here.
 - Not custody evidence: the host gate draws fresh native entropy, but runs on a
   development VM with one administrator and no independent guardian. The host
   remains `independentCustody=false`, `productionQualified=false`. The limit
