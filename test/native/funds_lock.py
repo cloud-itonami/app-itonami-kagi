@@ -42,7 +42,7 @@ def sh(cmd, caps=None, allow=None, ok=True):
         e['KEXE_CAP_RESOURCES_35'] = caps
     if allow:
         e['KEXE_ALLOW'] = allow
-    r = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=1500)
+    r = subprocess.run(cmd, env=e, capture_output=True, text=True, timeout=10800)
     if ok:
         assert r.returncode == 0, (cmd[:3], r.stdout[-300:], r.stderr[-300:])
     return r

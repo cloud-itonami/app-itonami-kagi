@@ -136,6 +136,23 @@ root is bound once and a binding cannot be installed on another root.
 `permit-funds-local` and `sign-funds-local` **re-verify the stored binding on
 every call** and refuse when it is missing or damaged.
 
+## Refusal log (JUN-549)
+
+Every refused `permit-funds-local`, `sign-funds-local`, `sign-binding-local`,
+`bind-local` and halted request appends one line to the private file `refusals`:
+`kagi.host.refusal.v1 TIME COMMAND REASON DIGEST PREV`, where REASON is a named
+reason (`limits/daily`, `limits/not-allowlisted`, `host/halted`, ...), DIGEST is
+the hash of the request and PREV the hash of the previous line (hash chain).
+`audit-refusals-local ROOT` re-verifies the chain and prints the entries; a
+dropped, reordered or rewritten line makes it fail. The log is bounded at 256
+entries: entry 256 is a `log/capacity-reached` marker and later refusals are not
+written, so a flood cannot grow the file without limit.
+
+Limits: truncating the tail of the file is not detectable from the file alone
+(no external anchor); refusals caused by unreadable state (missing or damaged
+keyset, journal or root) are not logged because the log cannot be trusted
+there; entries carry no secret and no request body.
+
 ## Kill switch and isolation (S0-f)
 
 `halt-local ROOT` creates the file `halt` in the private root (exclusive create,
@@ -290,3 +307,8 @@ first reproduces the pinned agent genesis digest and proof).
   remains `independentCustody=false`, `productionQualified=false`. The limit
   values in the vectors and gate (10 per transaction, 20 per day) are test
   values; real values are governed grants (JUN-527), not decided by an agent.
+- JUN-549 refusal log: the funds host gate gains the cases above (named reasons,
+  tamper detection by drop and rewrite, 300-refusal flood stopping at 256 with
+  the marker, halted reason). Mutations, each failing only its case: never
+  writing the log (R1), removing the capacity marker (R2), not verifying the
+  chain (R3), not logging halted requests (R4), not logging sign refusals (R5).

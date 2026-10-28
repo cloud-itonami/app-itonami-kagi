@@ -88,6 +88,33 @@
           (recur (+ end 1)
                  (if (and (= (kg-field line 0) "kagi.host.fentry.v1") (= (kh-day (kg-number (kg-field line 1))) today))
                    (+ total (kg-number (kg-field line 19))) total)))))))
+;; Refusal log (JUN-549). Funds requests the host refuses are recorded in a file
+;; separate from the signing journal, so spent / sequence / parent never depend on
+;; it. kagi.host.refusal.v1 TIME COMMAND REASON REQUEST_SHA256 PREV_HASH, chained to
+;; a header that names the config. It is bounded at 256 entries: the 256th is a
+;; fixed capacity marker and nothing is written after it, so a flood of refused
+;; requests cannot fill the disk. No seed, signature or allowlist text is recorded.
+(defn kh-refusals-header [config :string] :string (str "kagi.host.refusals.v1 " (kg-hash config)))
+(defn kh-refusals-scan [text :string config :string] :string
+  (let [header (str (kh-refusals-header config) "\n") h (string-length header) n (string-length text)]
+    (if (or (< n h) (> n 65536) (not= (string-substring text 0 h) header)) ""
+      (loop [start h count 0 last (kg-hash (kh-refusals-header config))]
+        (if (= start n) (str count " " last)
+          (if (>= count 256) ""
+            (let [end (kc-line-end text start)]
+              (if (= end n) ""
+                (let [line (string-substring text start end)]
+                  (if (and (kg-line? line 6) (= (kg-field line 0) "kagi.host.refusal.v1") (= (kg-field line 5) last))
+                    (recur (+ end 1) (+ count 1) (kg-hash line)) ""))))))))))
+(defn kh-log-refusal [root :string config :string command :string reason :string digest :string] :bool
+  (let [text (kh-read root "refusals") scan (kh-refusals-scan text config)]
+    (if (= scan "") false
+      (let [count (kg-number (kg-field scan 0)) last (kg-field scan 1)]
+        (if (>= count 256) false
+          (let [marker (= count 255)
+                entry (str "kagi.host.refusal.v1 " (kh-now) " " (if marker "log" command) " "
+                           (if marker "log/capacity-reached" reason) " " (if marker (kg-zero 64) digest) " " last)]
+            (kh-write "A" root "refusals" (str (kh-nul) text (kh-nul) entry "\n"))))))))
 ;; The binding file is the binding line, LF, then the verified identity keyset
 ;; bundle. It is re-verified on every funds operation, so a damaged or swapped
 ;; file stops signing instead of being trusted from creation time.
@@ -151,6 +178,7 @@
                 (not (kh-create root "delegate.seed" delegate))
                 (not (kh-create root "policy" policy))
                 (and funds (not (kh-create root "allowlist" allow)))
+                (and funds (not (kh-create root "refusals" (str (kh-refusals-header config) "\n"))))
                 (not (kh-create root "keyset.bundle" (str event " " manage " " proof "\n")))
                 (not (kh-create root "journal" (str (kh-header config) "\n")))
                 (not (kh-create root "config" config)))
@@ -173,8 +201,9 @@
       ;; Operator halt (S0-f). A halt file stops every permit and signature; the
       ;; read-only commands keep working so a lost reply can still be resolved.
       (and (not= (kh-read root "halt") "")
-           (not (or (= command "status-local") (= command "export-local") (= command "audit-local"))))
-        (kc-error "host halted by operator; no permit or signature is issued")
+           (not (or (= command "status-local") (= command "export-local") (= command "audit-local") (= command "audit-refusals-local"))))
+        (let [logged (kh-log-refusal root config command "host/halted" (kg-hash command))]
+          (kc-error "host halted by operator; no permit or signature is issued"))
       :else
       (cond
         (= command "export-local")
@@ -183,6 +212,10 @@
           ;; Public permit/signature records, after complete proof validation.
           ;; This lets a caller resolve a lost reply without signing again.
           (kc-output journal)
+        (= command "audit-refusals-local")
+          (let [text (kh-read root "refusals")]
+            (if (= (kh-refusals-scan text config) "") (kc-error "refusal log missing, damaged or over its bound")
+              (kc-output text)))
         (= command "status-local")
           (kc-output (kh-status-text state cursor now))
         (= command "permit-local")
@@ -252,13 +285,22 @@
                          " " (kg-field cursor 3) " " (kg-field config 3) " " (+ (kg-number (kg-field cursor 1)) 1)
                          " " now " " (+ now (kg-number (kg-field policy 6))))
                 signature (kh-sign-text (kh-read root "delegate.seed") permit)]
-            (if (or (not= (kg-field policy 1) "funds") (not (kh-bound? root state)) (not (kg-did-key? receiver)) (= receiver spender)
-                    (not (and (> (kg-number amount) 0) (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? sprev)))
-                    (not (kg-funds-limits-ok? policy receiver (kg-number amount) (kh-read root "allowlist") spent))
-                    (not= (kg-permit-problem state policy permit signature now (kg-number (kg-field cursor 1))
-                           (kg-number (kg-field config 3)) (kg-field cursor 3)) ""))
-              (kc-error "funds permit refused")
-              (kc-output (str permit " " signature " " receiver " " amount " " sprev " " nonce " " ts "\n"))))
+            (let [reason (cond (not= (kg-field policy 1) "funds") "host/role"
+                               (not (kh-bound? root state)) "host/not-bound"
+                               (not (kg-did-key? receiver)) "transfer/receiver"
+                               (= receiver spender) "transfer/self"
+                               (not (and (> (kg-number amount) 0) (>= (kg-number ts) 0) (kg-label? sprev) (kg-label? nonce))) "transfer/fields"
+                               (not= (kg-funds-limits-problem policy receiver (kg-number amount) (kh-read root "allowlist") spent) "")
+                                 (kg-funds-limits-problem policy receiver (kg-number amount) (kh-read root "allowlist") spent)
+                               (not= (kg-permit-problem state policy permit signature now (kg-number (kg-field cursor 1))
+                                      (kg-number (kg-field config 3)) (kg-field cursor 3)) "")
+                                 (kg-permit-problem state policy permit signature now (kg-number (kg-field cursor 1))
+                                   (kg-number (kg-field config 3)) (kg-field cursor 3))
+                               :else "")]
+              (if (not= reason "")
+                (let [logged (kh-log-refusal root config command reason (kg-hash (str receiver " " amount " " sprev " " nonce " " ts)))]
+                  (kc-error "funds permit refused"))
+                (kc-output (str permit " " signature " " receiver " " amount " " sprev " " nonce " " ts "\n")))))
         (= command "sign-funds-local")
           (let [request (typed-cap-call 35 :string :string (kc-arg 2))
                 end (kc-line-end request 0)
@@ -268,11 +310,21 @@
                 receiver (kg-field line 14) amount (kg-field line 15) sprev (kg-field line 16)
                 nonce (kg-field line 17) ts (kg-field line 18)
                 spent (kh-spent journal config (kh-day now))
-                signature (if (and shaped (= (kg-field policy 1) "funds") (kh-bound? root state))
-                  (kg-sign-transfer-hex (hex-bytes (kh-read root "author.seed")) state policy permit delegate now
+                seed (hex-bytes (kh-read root "author.seed"))
+                allow (kh-read root "allowlist")
+                reason (cond (not shaped) "host/request-shape"
+                             (not= (kg-field policy 1) "funds") "host/role"
+                             (not (kh-bound? root state)) "host/not-bound"
+                             :else (kg-transfer-problem seed state policy permit delegate now
+                                     (kg-number (kg-field cursor 1)) (kg-number (kg-field config 3)) (kg-field cursor 3)
+                                     receiver amount sprev nonce ts allow spent))
+                signature (if (= reason "")
+                  (kg-sign-transfer-hex seed state policy permit delegate now
                     (kg-number (kg-field cursor 1)) (kg-number (kg-field config 3)) (kg-field cursor 3)
-                    receiver amount sprev nonce ts (kh-read root "allowlist") spent) "")]
-            (if (= signature "") (kc-error "funds sign request refused")
+                    receiver amount sprev nonce ts allow spent) "")]
+            (if (= signature "")
+              (let [logged (kh-log-refusal root config command (if (= reason "") "host/signer" reason) (kg-hash line))]
+                (kc-error "funds sign request refused"))
               (let [commit-time (kh-now)
                     entry (str "kagi.host.fentry.v1 " commit-time " " permit " " delegate " " signature " " (kg-field cursor 4)
                                " " receiver " " amount " " sprev " " nonce " " ts)
@@ -295,7 +347,7 @@
               (if (or (= root "") (= directory "") (< count 1) (> count 720) (not= (kc-arg 4) ""))
                 (kc-error "usage: watch-local PRIVATE_ROOT PUBLIC_DIRECTORY SAMPLES_1_TO_720")
                 (kh-watch root directory count)))
-          (and (or (= command "status-local") (= command "export-local") (= command "audit-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
+          (and (or (= command "status-local") (= command "export-local") (= command "audit-local") (= command "audit-refusals-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
           (and (= command "permit-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 4) "")) (kh-operate command root)
           (and (= command "halt-local") (not= root "") (= (kc-arg 2) "")) (arena-scope (kh-halt root))
           (and (= command "sign-binding-local") (not= root "") (not= (kc-arg 4) "") (= (kc-arg 5) "")) (arena-scope (kh-operate command root))
@@ -303,4 +355,4 @@
           (and (= command "permit-funds-local") (not= root "") (not= (kc-arg 6) "") (= (kc-arg 7) "")) (arena-scope (kh-operate command root))
           (and (= command "sign-funds-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-operate command root))
           (and (or (= command "sign-local") (= command "sign-local-line")) (not= root "") (not= (kc-arg 2) "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
-          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local | halt-local; no legacy keys"))))
+          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local | halt-local | audit-refusals-local; no legacy keys"))))
