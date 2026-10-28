@@ -1,4 +1,4 @@
-# Native funds role (JUN-501 S0-c, S0-d, S0-c2, S0-e and S0-f, ADR 0021)
+# Native funds role (JUN-501 S0-c to S0-g, ADR 0021)
 
 The pure core (`kotoba/kagi/agent_signer.kotoba`) gains a third policy role,
 `funds`, with exactly one purpose, `en-transfer`:
@@ -164,6 +164,29 @@ own user with `sudo -n -u nobody` for the other user:
 - no command output (init, status, export, audit, halt, refusals) contains any
   seed. The author, guardian and delegate seeds are separate files, and routine
   signing reads only the author seed.
+
+## Lock and reproduction (S0-g)
+
+`native-funds-host.lock.json` records the funds-capable source and everything
+built from it with the same pinned toolchain as `native-local-host.lock.json`
+(amu F3 `bcebb888...`, the sha2 and ed25519 owners): the SHA-256 of the four
+source files, the assembler and the host assembly, the host artifact, each
+gate artifact with its pass count (the 32-case core gate, S0-a, S0-b, S0-c), and
+the case counts of the host, agent-host, funds-host and isolation gates. The
+JUN-299 lock is kept as the record of the agent/node host and is not edited.
+
+```
+python3 -I test/native/funds_lock.py --compiler amu-root --owners OWNERS \
+    --build NEW_DIR --measured OUT.json --verify native-funds-host.lock.json
+```
+
+It refuses to build unless the compiler and both owner sources match their pins,
+rebuilds everything from this checkout, runs every gate, and exits non-zero on
+any difference from the lock. It was run twice into different directories; both
+runs agreed with each other and with the lock (see Evidence). The host gates
+draw fresh native entropy, so only their counts and the host artifact digest
+are pinned. The lock says in its own fields that nothing here is production,
+independent custody, project-link or CDCI qualified.
 
 ## Evidence (2026-10-28, this source, pinned compiler and owners)
 
