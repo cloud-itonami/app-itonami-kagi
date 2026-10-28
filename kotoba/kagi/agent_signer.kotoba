@@ -6,7 +6,7 @@
 (ns kagi.agent-signer
   (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
             kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign
-            kg-did-key? kg-did-of kg-transfer-body kg-transfer-id kg-sign-transfer])
+            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer])
   (:require [sha2.core :refer [sha256-hex hex]]
             [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
 
@@ -136,7 +136,7 @@
         (and (= declared "cell-writes") (= (kg-field policy 1) "agent")
              (or (= purpose "cell-action") (= purpose "state-commit"))))))
 (defn kg-policy-problem [policy :string] :string
-  (cond (not (kg-line? policy 7)) "signer/policy-shape"
+  (cond (not (kg-line? policy (if (= (kg-field policy 1) "funds") 10 7))) "signer/policy-shape"
         (not= (kg-field policy 0) "kagi.agent.policy.v1") "signer/policy-version"
         (not (and (kg-label? (kg-field policy 2)) (kg-label? (kg-field policy 3))
                   (kg-public? (kg-field policy 4)) (> (kg-number (kg-field policy 6)) 0)
@@ -146,6 +146,9 @@
                  (and (= (kg-field policy 1) "node")
                       (or (= (kg-field policy 5) "node-declaration") (= (kg-field policy 5) "node-heartbeat") (= (kg-field policy 5) "node-statements")))
                  (and (= (kg-field policy 1) "funds") (= (kg-field policy 5) "en-transfer")))) "signer/role-purpose"
+        (and (= (kg-field policy 1) "funds")
+             (not (and (> (kg-number (kg-field policy 7)) 0) (>= (kg-number (kg-field policy 8)) (kg-number (kg-field policy 7)))
+                       (kg-hex? (kg-field policy 9) 64)))) "signer/funds-limits"
         :else ""))
 ;; permit: prefix keyset head epoch purpose scope audience body parent fence sequence issued expires
 (defn kg-permit-problem [state :string policy :string permit :string signature :string now :i64
@@ -259,11 +262,26 @@
         a (vector-assoc! cid 0 1) b (vector-assoc! cid 1 113) c (vector-assoc! cid 2 18) d (vector-assoc! cid 3 32)
         e (loop [i 0] (if (>= i 32) 0 (let [z (vector-assoc! cid (+ 4 i) (vector-at h i))] (recur (+ i 1)))))]
     (string-concat "b" (kg-b32 cid))))
+;; S0-d limits, pinned in the funds policy line (hence in the keyset policy digest,
+;; so only a guardian-signed govern event changes them):
+;;   ... en-transfer MAX_TTL_MS MAX_AMOUNT DAILY_CAP ALLOWLIST_SHA256
+;; The allowlist is the text "\n" + one did:key + "\n" per receiver; its SHA-256 must
+;; equal the pinned digest, and the receiver must appear as a whole line. The host
+;; supplies `spent`, the amount already signed in the current window, from its
+;; journal; this pure function neither keeps nor resets it.
+(defn kg-funds-limits-ok? [policy :string receiver :string amount :i64 allowlist :string spent :i64] :bool
+  (and (>= amount 1) (>= spent 0)
+       (<= amount (kg-number (kg-field policy 7)))
+       (<= (+ spent amount) (kg-number (kg-field policy 8)))
+       (<= (string-length allowlist) 4096)
+       (= (kg-hash allowlist) (kg-field policy 9))
+       (>= (string-index-of allowlist (str "\n" receiver "\n")) 0)))
 ;; Output: base64url Ed25519 signature over the transfer-id text (the ENGI
 ;; self-sig), or empty on any refusal. Persistence of replay state is the host's.
 (defn kg-sign-transfer [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
                         last-sequence :i64 fence :i64 parent :string
-                        receiver :string amount :string spender-prev :string nonce :string ts :string] :string
+                        receiver :string amount :string spender-prev :string nonce :string ts :string
+                        allowlist :string spent :i64] :string
   (if (or (not= (vector-count seed) 32)
           (not= (kg-field policy 1) "funds")
           (not= (kg-field permit 4) "en-transfer")
@@ -272,7 +290,8 @@
       (if (not= public (kg-field state 5)) ""
         (let [spender (kg-did-of public)]
           (if (not (and (kg-did-key? receiver) (not= receiver spender) (> (kg-number amount) 0)
-                        (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? spender-prev))) ""
+                        (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? spender-prev)
+                        (kg-funds-limits-ok? policy receiver (kg-number amount) allowlist spent))) ""
             (let [body (kg-transfer-body spender receiver amount spender-prev nonce ts)]
               (if (not= (kg-hash body) (kg-field permit 7)) ""
                 (let [output (kg-vzero 64) result (sign-into output seed (kg-bytes (kg-transfer-id body)))]
