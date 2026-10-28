@@ -36,7 +36,27 @@
       (if (and (= (kg-state-problem state) "") (= (kg-field state 2) (kg-field config 2))
                (= (kg-field state 5) (kg-field config 5))) state ""))))
 (defn kh-header [config :string] :string (str "kagi.host.journal.v1 " (kg-hash config)))
+(defn kh-day [ms :i64] :i64 (quot ms 86400000))
+;; A funds journal entry carries the transfer fields, so replay can rebuild the
+;; TransferBody, check the permit's body digest and verify the author's
+;; signature over the transfer-id (not over the permit, as for agent entries).
+;; kagi.host.fentry.v1 COMMIT_MS PERMIT(13) DELEGATE AUTHOR_SIG_HEX PREV_HASH RECEIVER AMOUNT SPENDER_PREV NONCE TS
+(defn kh-fentry-ok? [cursor :string line :string state :string policy :string fence :i64] :bool
+  (let [now (kg-number (kg-field line 1)) permit (kh-fields line 2 15)
+        delegate (kg-field line 15) sig (kg-field line 16)
+        body (kg-transfer-body (kg-did-of (kg-field state 5)) (kg-field line 18) (kg-field line 19)
+                               (kg-field line 20) (kg-field line 21) (kg-field line 22))]
+    (and (= (kg-field policy 1) "funds")
+         (>= now (kg-number (kg-field cursor 2)))
+         (= (kg-field line 17) (kg-field cursor 4))
+         (= (kg-permit-problem state policy permit delegate now (kg-number (kg-field cursor 1)) fence (kg-field cursor 3)) "")
+         (kg-did-key? (kg-field line 18)) (> (kg-number (kg-field line 19)) 0)
+         (= (kg-hash body) (kg-field permit 7))
+         (kg-verify (kg-field state 5) (kg-transfer-id body) sig))))
 (defn kh-cursor-step [cursor :string line :string state :string policy :string fence :i64] :string
+  (if (= (kg-field line 0) "kagi.host.fentry.v1")
+    (if (and (kg-line? line 23) (= (arena-scope (if (kh-fentry-ok? cursor line state policy fence) 1 0)) 1))
+      (str "kagi.host.cursor.v1 " (kg-field line 12) " " (kg-field line 1) " " (kg-field line 9) " " (kg-hash line)) "")
   (if (not (kg-line? line 18)) ""
     (let [now (kg-number (kg-field line 1)) permit (kh-fields line 2 15)
           delegate (kg-field line 15) author (kg-field line 16)]
@@ -46,7 +66,7 @@
                (= (kg-permit-problem state policy permit delegate now
                     (kg-number (kg-field cursor 1)) fence (kg-field cursor 3)) "")
                (kg-verify (kg-field state 5) (kg-permit-message permit) author)) 1 0)) 1)
-        (str "kagi.host.cursor.v1 " (kg-field permit 10) " " now " " (kg-field permit 7) " " (kg-hash line)) ""))))
+        (str "kagi.host.cursor.v1 " (kg-field permit 10) " " now " " (kg-field permit 7) " " (kg-hash line)) "")))))
 (defn kh-cursor [journal :string config :string state :string policy :string] :string
   (let [header (str (kh-header config) "\n") h (string-length header) n (string-length journal)]
     (if (or (< n h) (> n 1048576) (not= (string-substring journal 0 h) header)) ""
@@ -58,6 +78,16 @@
                 (let [line (string-substring journal start end)
                       next (kh-cursor-step cursor line state policy (kg-number (kg-field config 3)))]
                   (recur (+ end 1) (+ count 1) next))))))))))
+;; The amount already signed today (UTC day), derived from the journal that
+;; kh-cursor has just verified in full; it is never taken from a caller.
+(defn kh-spent [journal :string config :string today :i64] :i64
+  (let [n (string-length journal) h (string-length (str (kh-header config) "\n"))]
+    (loop [start h total 0]
+      (if (>= start n) total
+        (let [end (kc-line-end journal start) line (string-substring journal start end)]
+          (recur (+ end 1)
+                 (if (and (= (kg-field line 0) "kagi.host.fentry.v1") (= (kh-day (kg-number (kg-field line 1))) today))
+                   (+ total (kg-number (kg-field line 19))) total)))))))
 (defn kh-ready? [state :string policy :string cursor :string] :bool
   (and (= (kg-state-problem state) "") (= (kg-field state 4) "active")
        (= (kg-policy-problem policy) "") (= (kg-hash policy) (kg-field state 6))
@@ -94,9 +124,12 @@
         public (hex (public-from-seed (hex-bytes author)))
         gp (hex (public-from-seed (hex-bytes guardian)))
         dp (hex (public-from-seed (hex-bytes delegate)))
-        policy (str "kagi.agent.policy.v1 " (kc-arg 2) " " (kc-arg 3) " " (kc-arg 4) " " dp " " (kc-arg 5) " " (kc-arg 6))]
-    (if (or (= root "") (not= (kc-arg 7) "") (not= (kg-policy-problem policy) ""))
-      (kc-error "usage: init-local PRIVATE_ROOT agent|node SCOPE AUDIENCE PURPOSE MAX_TTL_MS")
+        funds (= (kc-arg 2) "funds")
+        allow (if funds (typed-cap-call 35 :string :string (kc-arg 9)) "")
+        policy (str "kagi.agent.policy.v1 " (kc-arg 2) " " (kc-arg 3) " " (kc-arg 4) " " dp " " (kc-arg 5) " " (kc-arg 6)
+                    (if funds (str " " (kc-arg 7) " " (kc-arg 8) " " (kg-hash allow)) ""))]
+    (if (or (= root "") (not (if funds (and (not= allow "") (= (kc-arg 10) "")) (= (kc-arg 7) ""))) (not= (kg-policy-problem policy) ""))
+      (kc-error "usage: init-local PRIVATE_ROOT agent|node SCOPE AUDIENCE PURPOSE MAX_TTL_MS | init-local PRIVATE_ROOT funds SCOPE AUDIENCE en-transfer MAX_TTL_MS MAX_AMOUNT DAILY_CAP ALLOWLIST_FILE")
       (let [event (kg-event "genesis" 0 (kg-zero 64) public (kg-hash policy) (str gp (kg-zero 128)) 1)
             pin (kg-hash event)
             manage (str (kh-sign-text guardian (str "kagi.keyset.manage.v1\n" event)) (kg-zero 256))
@@ -108,6 +141,7 @@
                 (not (kh-create root "guardian.seed" guardian))
                 (not (kh-create root "delegate.seed" delegate))
                 (not (kh-create root "policy" policy))
+                (and funds (not (kh-create root "allowlist" allow)))
                 (not (kh-create root "keyset.bundle" (str event " " manage " " proof "\n")))
                 (not (kh-create root "journal" (str (kh-header config) "\n")))
                 (not (kh-create root "config" config)))
@@ -161,6 +195,54 @@
                   (kc-output (str "{\"schema\":\"kagi.host.signature.v1\",\"mode\":\"local-software\",\"sequence\":" (kg-field permit 10)
                     ",\"author\":\"" (kg-field state 5) "\",\"permit\":\"" permit "\",\"delegateSignature\":\"" delegate
                     "\",\"signature\":\"" signature "\",\"journalHead\":\"" (kg-hash entry) "\"}\n")))))))
+        ;; Funds (S0-c2). permit-funds-local builds the canonical TransferBody
+        ;; itself from the request fields, checks the pinned limits against the
+        ;; verified journal, and has the delegate sign a permit committing to that
+        ;; body. Output: PERMIT(13) DELEGATE RECEIVER AMOUNT SPENDER_PREV NONCE TS.
+        (= command "permit-funds-local")
+          (let [receiver (kc-arg 2) amount (kc-arg 3) sprev (kc-arg 4) nonce (kc-arg 5) ts (kc-arg 6)
+                spender (kg-did-of (kg-field state 5))
+                body (kg-transfer-body spender receiver amount sprev nonce ts)
+                spent (kh-spent journal config (kh-day now))
+                permit (str "kagi.agent.permit.v1 " (kg-field state 1) " " (kg-field state 2) " " (kg-field state 3)
+                         " en-transfer " (kg-field policy 2) " " (kg-field policy 3) " " (kg-hash body)
+                         " " (kg-field cursor 3) " " (kg-field config 3) " " (+ (kg-number (kg-field cursor 1)) 1)
+                         " " now " " (+ now (kg-number (kg-field policy 6))))
+                signature (kh-sign-text (kh-read root "delegate.seed") permit)]
+            (if (or (not= (kg-field policy 1) "funds") (not (kg-did-key? receiver)) (= receiver spender)
+                    (not (and (> (kg-number amount) 0) (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? sprev)))
+                    (not (kg-funds-limits-ok? policy receiver (kg-number amount) (kh-read root "allowlist") spent))
+                    (not= (kg-permit-problem state policy permit signature now (kg-number (kg-field cursor 1))
+                           (kg-number (kg-field config 3)) (kg-field cursor 3)) ""))
+              (kc-error "funds permit refused")
+              (kc-output (str permit " " signature " " receiver " " amount " " sprev " " nonce " " ts "\n"))))
+        (= command "sign-funds-local")
+          (let [request (typed-cap-call 35 :string :string (kc-arg 2))
+                end (kc-line-end request 0)
+                line (string-substring request 0 end)
+                shaped (and (kg-line? line 19) (= (+ end 1) (string-length request)))
+                permit (if shaped (kh-fields line 0 13) "") delegate (if shaped (kg-field line 13) "")
+                receiver (kg-field line 14) amount (kg-field line 15) sprev (kg-field line 16)
+                nonce (kg-field line 17) ts (kg-field line 18)
+                spent (kh-spent journal config (kh-day now))
+                signature (if (and shaped (= (kg-field policy 1) "funds"))
+                  (kg-sign-transfer-hex (hex-bytes (kh-read root "author.seed")) state policy permit delegate now
+                    (kg-number (kg-field cursor 1)) (kg-number (kg-field config 3)) (kg-field cursor 3)
+                    receiver amount sprev nonce ts (kh-read root "allowlist") spent) "")]
+            (if (= signature "") (kc-error "funds sign request refused")
+              (let [commit-time (kh-now)
+                    entry (str "kagi.host.fentry.v1 " commit-time " " permit " " delegate " " signature " " (kg-field cursor 4)
+                               " " receiver " " amount " " sprev " " nonce " " ts)
+                    committed (and (>= commit-time now) (<= commit-time (kg-number (kg-field permit 12)))
+                      (kh-write "A" root "journal" (str (kh-nul) journal (kh-nul) entry "\n")))
+                    reply-time (kh-now)
+                    body (kg-transfer-body (kg-did-of (kg-field state 5)) receiver amount sprev nonce ts)]
+                (if (or (not committed) (< reply-time commit-time) (> reply-time (kg-number (kg-field permit 12))))
+                  (kc-error "journal/clock/deadline refused; no signature released")
+                  (kc-output (str "{\"schema\":\"kagi.host.funds-signature.v1\",\"mode\":\"local-software\",\"sequence\":" (kg-field permit 10)
+                    ",\"spender\":\"" (kg-did-of (kg-field state 5)) "\",\"transferId\":\"" (kg-transfer-id body)
+                    "\",\"signature\":\"" (kg-b64u (hex-bytes signature)) "\",\"spentBefore\":" spent
+                    ",\"journalHead\":\"" (kg-hash entry) "\"}\n"))))))
         :else (kc-error "unsupported local host operation")))))
 (defn main [] :i64
   (let [command (kc-arg 0) root (kc-arg 1)]
@@ -172,5 +254,7 @@
                 (kh-watch root directory count)))
           (and (or (= command "status-local") (= command "export-local") (= command "audit-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
           (and (= command "permit-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 4) "")) (kh-operate command root)
+          (and (= command "permit-funds-local") (not= root "") (not= (kc-arg 6) "") (= (kc-arg 7) "")) (arena-scope (kh-operate command root))
+          (and (= command "sign-funds-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-operate command root))
           (and (or (= command "sign-local") (= command "sign-local-line")) (not= root "") (not= (kc-arg 2) "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
-          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local; no legacy keys"))))
+          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local; no legacy keys"))))
