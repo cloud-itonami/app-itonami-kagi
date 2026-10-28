@@ -6,7 +6,7 @@
 (ns kagi.agent-signer
   (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
             kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign
-            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer-hex kg-sign-transfer])
+            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer-hex kg-sign-transfer kg-binding-statement kg-binding-message kg-binding-problem])
   (:require [sha2.core :refer [sha256-hex hex]]
             [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
 
@@ -304,3 +304,32 @@
   (let [h (kg-sign-transfer-hex seed state policy permit signature now last-sequence fence parent
                                 receiver amount spender-prev nonce ts allowlist spent)]
     (if (= h "") "" (kg-b64u (hex-bytes h)))))
+
+;; ---------------------------------------------------------------------------
+;; Identity <-> funds binding (JUN-501 S0-e, ADR 0021). A funds key is only a bot's
+;; funds key if its identity key vouches for it AND it vouches for the identity:
+;;   kagi.funds.binding.v1 IDENTITY_PUB FUNDS_PUB IDENTITY_KEYSET_PIN IDENTITY_SIG FUNDS_SIG
+;; The statement is the first four fields. The identity key signs
+;; "kagi.funds.binding.identity.v1\n" + statement, the funds key signs
+;; "kagi.funds.binding.funds.v1\n" + statement; both prefixes differ from the
+;; action domain and from a transfer-id, so neither signature can be replayed as
+;; anything else (nor swapped with the other). The identity keyset state comes
+;; from a verified bundle (kc-verify-bundle) and must be active.
+(defn kg-binding-statement [binding :string] :string
+  (str (kg-field binding 0) " " (kg-field binding 1) " " (kg-field binding 2) " " (kg-field binding 3)))
+(defn kg-binding-message [role :string statement :string] :string
+  (string-concat (if (= role "identity") "kagi.funds.binding.identity.v1\n" "kagi.funds.binding.funds.v1\n") statement))
+(defn kg-binding-problem [binding :string identity-state :string funds-author :string] :string
+  (cond (not (kg-line? binding 6)) "binding/shape"
+        (not= (kg-field binding 0) "kagi.funds.binding.v1") "binding/version"
+        (not (and (kg-public? (kg-field binding 1)) (kg-public? (kg-field binding 2)) (kg-hex? (kg-field binding 3) 64)
+                  (kg-hex? (kg-field binding 4) 128) (kg-hex? (kg-field binding 5) 128))) "binding/fields"
+        (= (kg-field binding 1) (kg-field binding 2)) "binding/same-key"
+        (not= (kg-state-problem identity-state) "") "binding/identity-state"
+        (not= (kg-field identity-state 4) "active") "binding/identity-revoked"
+        (not= (kg-field identity-state 1) (kg-field binding 3)) "binding/identity-pin"
+        (not= (kg-field identity-state 5) (kg-field binding 1)) "binding/identity-key"
+        (not= (kg-field binding 2) funds-author) "binding/funds-key"
+        (not (kg-verify (kg-field binding 1) (kg-binding-message "identity" (kg-binding-statement binding)) (kg-field binding 4))) "binding/identity-signature"
+        (not (kg-verify (kg-field binding 2) (kg-binding-message "funds" (kg-binding-statement binding)) (kg-field binding 5))) "binding/funds-signature"
+        :else ""))
