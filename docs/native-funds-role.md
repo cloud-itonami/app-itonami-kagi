@@ -153,6 +153,38 @@ Limits: truncating the tail of the file is not detectable from the file alone
 keyset, journal or root) are not logged because the log cannot be trusted
 there; entries carry no secret and no request body.
 
+## Guardian-signed revoke (JUN-558)
+
+`revoke-local ROOT LINE_FILE` applies one keyset bundle line `EVENT SIGNATURES
+AUTHOR_PROOF` whose event is a `revoke`. The host never signs it: the guardian
+signs `kagi.keyset.manage.v1\n` + event elsewhere. The line must pass the same
+keyset check as any bundle entry (pinned genesis, parent = current head, next
+epoch, author / policy / guardians / threshold unchanged, guardian signatures
+at the threshold, no author proof) and must be a `revoke` (a signed `govern`,
+`rotate` or `recover` is refused with `keyset/not-a-revoke` / their own
+reasons). A refusal appends nothing and is logged with its named reason; success
+appends the line to `keyset.bundle` through the private-root append (compare and
+append), so a concurrent change fails the write. Like `halt-local` it does not
+need the journal or policy to be readable.
+
+After a revoke the keyset state is `revoked`. `kh-state` accepts a revoked state
+whose head moved (a revoke moves the head, which `config` records at init)
+because a revoked state can only restrict the host; the chain is still verified
+from the pinned genesis and the author must be the configured one. Every
+`permit-*`, `sign-*`, `sign-binding-local`, `bind-local` and `audit-local` is
+then refused as `host/keyset-revoked` and logged, including a signature for a
+permit issued before the revoke. `status-local` (with `revoked`, head and
+epoch), `export-local` (which now ends with the signed revoke line) and
+`audit-refusals-local` keep working, so a third party can verify the revoke from
+the export alone. The operator halt still works on a revoked root.
+
+Limits: `init-local` creates a 1-of-1 guardian keyset, so the host gate shows
+"below threshold" with no signature or a non-guardian signature; the counting of
+2-of-3 thresholds is the core gate's. The gate reads the fixture's guardian seed
+to sign; that is a test of the host, not independent guardian custody. Revoking
+does not unwind a transfer already signed and submitted (the ENGI side decides
+that), and a revoke is not visible to a party that has not read the export.
+
 ## Kill switch and isolation (S0-f)
 
 `halt-local ROOT` creates the file `halt` in the private root (exclusive create,
@@ -312,3 +344,8 @@ first reproduces the pinned agent genesis digest and proof).
   the marker, halted reason). Mutations, each failing only its case: never
   writing the log (R1), removing the capacity marker (R2), not verifying the
   chain (R3), not logging halted requests (R4), not logging sign refusals (R5).
+- JUN-558 revoke: 16 funds-gate cases (see the section above). Mutations, each
+  failing only the case that guards it (see the PR): not checking that the event
+  is a revoke (M1), no revoked-state branch (M2), `kh-state` insisting on the
+  config head (M3), skipping the keyset check (M4), not writing the append (M5),
+  not logging a refused revoke (M6) or a request refused after it (M7).

@@ -370,6 +370,101 @@ h2 = run('audit-refusals-local', funds2).strip().split('\n')
 assert [l.split(' ')[3] for l in h2[1:]] == ['host/halted']
 passed('a request refused because the host is halted is logged as host/halted')
 
+# ---- guardian-signed revoke (JUN-558) -------------------------------------------------
+# The guardian signs outside the host (here: the gate reads the fixture's guardian seed and signs with
+# OpenSSL); the host only checks the line against the keyset and appends it.
+funds4 = out / 'funds4'
+funds4.mkdir(mode=0o700)
+f4 = json.loads(run('init-local', funds4, 'funds', 'mon:funds', 'hata:funds', 'en-transfer', '60000', '10', '20', allow))
+bind4 = binding_line(id_pub, f4['author'], id_pin, sig_of(idroot, id_pub, f4['author'], id_pin), sig_of(funds4, id_pub, f4['author'], id_pin))
+assert json.loads(try_bind(bind4, r=funds4))['funds'] == f4['author']
+gseed = (funds4 / 'guardian.seed').read_text().strip()
+bundle4 = (funds4 / 'keyset.bundle').read_text()
+genesis4 = bundle4.strip().split(' ')[:8]
+gev = ' '.join(genesis4)
+gpub = ed_sign(gseed, 'x')[1]
+assert genesis4[6] == gpub + '0' * 128 and genesis4[7] == '1'
+
+
+def revoke_line(op='revoke', epoch='1', parent=None, policy=None, signer=None, proof=Z, sign_domain='kagi.keyset.manage.v1\n', sigs=None):
+    ev = ' '.join(['kagi.keyset.event.v1', op, epoch, parent or sha(gev), genesis4[4], policy or genesis4[5], genesis4[6], genesis4[7]])
+    sig = sigs if sigs is not None else ed_sign(signer or gseed, sign_domain + ev)[0] + '0' * 256
+    return ev, ev + ' ' + sig + ' ' + proof
+
+
+def try_revoke(line, r=funds4, expected=0):
+    f = out / 'revoke.line'
+    f.write_text(line)
+    return run('revoke-local', r, f, expected=expected)
+
+
+before_bundle = (funds4 / 'keyset.bundle').read_bytes()
+sdelegate = (funds4 / 'delegate.seed').read_text().strip()
+# a permit and its transfer line issued before the revoke, to try after it
+pre = request(funds4, RECEIVER, '4', 'rv0', ts='1000')
+assert json.loads(run('status-local', funds4))['sequence'] == 0
+
+try_revoke(revoke_line(sigs='0' * 384)[1] + '\n', expected=2)
+passed('revoke-local: no guardian signature (below the threshold) does not revoke')
+try_revoke(revoke_line(signer=sdelegate)[1] + '\n', expected=2)
+passed('revoke-local: a signature by a key that is not a guardian does not revoke')
+try_revoke(revoke_line(sign_domain='kagi.agent.action.v1\n')[1] + '\n', expected=2)
+passed('revoke-local: a guardian signature over another domain does not revoke')
+try_revoke(revoke_line(policy=sha('another policy'))[1] + '\n', expected=2)
+passed('revoke-local: a signed revoke that also changes the policy is refused')
+try_revoke(revoke_line(parent=sha('not the head'))[1] + '\n', expected=2)
+try_revoke(revoke_line(epoch='2')[1] + '\n', expected=2)
+passed('revoke-local: a wrong parent or epoch is refused')
+try_revoke(revoke_line(op='govern')[1] + '\n', expected=2)
+passed('revoke-local: a signed event of another operation (govern) is not accepted as a revoke')
+try_revoke(revoke_line(proof='1' * 128)[1] + '\n', expected=2)
+passed('revoke-local: a revoke carrying an author proof is refused')
+good_ev, good_line = revoke_line()
+try_revoke(good_line.rsplit(' ', 1)[0] + '\n', expected=2)
+try_revoke(good_line + '\n' + good_line + '\n', expected=2)
+try_revoke('\n', expected=2)
+passed('revoke-local: a malformed line, two lines or an empty file are refused')
+assert (funds4 / 'keyset.bundle').read_bytes() == before_bundle
+assert json.loads(run('status-local', funds4)).get('revoked') is None
+signed_still = json.loads(sign(funds4, pre))
+assert signed_still['sequence'] == 1
+passed('every refused revoke leaves the keyset bundle unchanged and the root still signs')
+
+pre2 = request(funds4, RECEIVER, '2', 'rv1', prev=signed_still['transferId'], ts='1100')     # issued, not yet signed
+done = json.loads(try_revoke(good_line + '\n'))
+assert done['revoked'] is True and done['epoch'] == 1 and done['head'] == sha(good_ev)
+passed('revoke-local: a correctly guardian-signed revoke is applied')
+after_bundle = (funds4 / 'keyset.bundle').read_text()
+assert after_bundle == bundle4 + good_line + '\n'
+jb = (funds4 / 'journal').read_bytes()
+request(funds4, RECEIVER, '1', 'rv2', ts='1200', expected=2)
+sign(funds4, pre2, expected=2)
+sig_of(funds4, id_pub, f4['author'], id_pin, expected=2)
+try_bind(bind4, r=funds4, expected=2)
+run('audit-local', funds4, expected=2)
+assert (funds4 / 'journal').read_bytes() == jb
+passed('after the revoke no permit, signature (also for a permit issued before it), binding signature or binding is issued, and the journal is untouched')
+rs = json.loads(run('status-local', funds4))
+assert rs['revoked'] is True and rs['head'] == sha(good_ev) and rs['epoch'] == 1
+exported = run('export-local', funds4).strip().split('\n')
+assert exported[2].strip().split('\n')[-1] == good_line or exported[-1] == good_line
+passed('status and export still work after the revoke and show the revoked head and the signed revoke line')
+# a third party checks the exported line with OpenSSL only: parent = genesis hash, one valid guardian signature
+parts = exported[-1].split(' ')
+assert parts[1] == 'revoke' and parts[3] == sha(gev) and parts[4:8] == genesis4[4:8]
+gsig_b64 = base64.urlsafe_b64encode(bytes.fromhex(parts[8][:128])).decode().rstrip('=')
+assert openssl_verify(gpub, 'kagi.keyset.manage.v1\n' + ' '.join(parts[:8]), gsig_b64)
+passed('the exported revoke line verifies with OpenSSL alone: genesis parent, unchanged policy, guardian signature')
+try_revoke(good_line + '\n', expected=2)
+passed('a second revoke of the same keyset is refused')
+rl4 = [l.split(' ') for l in run('audit-refusals-local', funds4).strip().split('\n')[1:]]
+reasons4 = [l[3] for l in rl4]
+assert 'host/keyset-revoked' in reasons4 and 'keyset/management-signature' in reasons4 and 'keyset/not-a-revoke' in reasons4
+assert 'keyset/revoke-changes-policy' in reasons4 and 'keyset/parent-or-epoch' in reasons4, reasons4
+passed('refused revokes and the requests refused after the revoke are logged with named reasons')
+run('halt-local', funds4)
+passed('the operator halt still works on a revoked root')
+
 report = {'schema': 'kagi.native.funds-host.gate.v1', 'host': platform.machine(),
           'artifactSha256': hashlib.sha256(a.artifact.read_bytes()).hexdigest(),
           'passed': True, 'count': len(cases), 'cases': cases,

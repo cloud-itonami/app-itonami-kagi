@@ -33,7 +33,11 @@
 (defn kh-state [root :string config :string] :string
   (if (not (kh-config? config)) ""
     (let [state (kc-verify-bundle (kh-read root "keyset.bundle") (kg-field config 1))]
-      (if (and (= (kg-state-problem state) "") (= (kg-field state 2) (kg-field config 2))
+;; The head must be the one recorded in config. The one exception is a revoked
+;; keyset (S0-i): a guardian-signed revoke moves the head, and a revoked state
+;; can only restrict the host, so it is accepted on the pinned genesis and author.
+      (if (and (= (kg-state-problem state) "")
+               (or (= (kg-field state 2) (kg-field config 2)) (= (kg-field state 4) "revoked"))
                (= (kg-field state 5) (kg-field config 5))) state ""))))
 (defn kh-header [config :string] :string (str "kagi.host.journal.v1 " (kg-hash config)))
 (defn kh-day [ms :i64] :i64 (quot ms 86400000))
@@ -191,11 +195,51 @@
   (if (kh-create root "halt" (str (kh-now) " halted by operator"))
     (kc-output "{\"schema\":\"kagi.host.halt.v1\",\"halted\":true}\n")
     (kc-error "halt refused (already halted, or the root is unavailable)")))
+;; revoke-local applies a guardian-signed `revoke` keyset event (S0-i). The line
+;; is `EVENT SIGNATURES AUTHOR_PROOF` as in keyset.bundle; the host never signs
+;; it. Like halt it does not need the journal or policy to be readable, but the
+;; whole line must pass the same keyset check as any bundle entry (parent, epoch,
+;; unchanged author/policy/guardians, guardian threshold) and be a revoke.
+(defn kh-revoke [root :string] :i64
+  (let [config (kh-read root "config") state (kh-state root config)
+        text (typed-cap-call 35 :string :string (kc-arg 2))
+        n (string-length text) end (kc-line-end text 0)
+        line (string-substring text 0 end)]
+    (if (or (= state "") (= n 0) (not (or (= end n) (= (+ end 1) n))) (not (kg-line? line 10)))
+      (kc-error "revoke refused: unreadable state or malformed revoke line")
+      (let [event (string-substring line 0 (kc-event-end line))
+            problem (cond (not= (kg-field event 1) "revoke") "keyset/not-a-revoke"
+                          :else (kg-keyset-problem state (kg-field config 1) event (kg-field line 8) (kg-field line 9)))]
+        (if (not= problem "")
+          (let [logged (kh-log-refusal root config "revoke-local" problem (kg-hash line))]
+            (kc-error (str "revoke refused: " problem)))
+          (let [bundle (kh-read root "keyset.bundle")]
+            (if (kh-write "A" root "keyset.bundle" (str (kh-nul) bundle (kh-nul) line "\n"))
+              (kc-output (str "{\"schema\":\"kagi.host.revoke.v1\",\"revoked\":true,\"epoch\":" (kg-field event 2) ",\"head\":\"" (kg-hash event) "\"}\n"))
+              (kc-error "revoke refused: keyset bundle could not be appended"))))))))
+;; A revoked keyset keeps only the read-only views; everything else is refused
+;; with a named, logged reason (the cursor and journal need an active keyset).
+(defn kh-revoked [command :string root :string config :string state :string] :i64
+  (cond
+    (= command "export-local")
+      (kc-output (str config "\n" (kh-read root "policy") "\n" (kh-read root "keyset.bundle")))
+    (= command "audit-refusals-local")
+      (let [text (kh-read root "refusals")]
+        (if (= (kh-refusals-scan text config) "") (kc-error "refusal log missing, damaged or over its bound")
+          (kc-output text)))
+    (= command "status-local")
+      (kc-output (str "{\"schema\":\"kagi.host.status.v1\",\"mode\":\"local-software\",\"independentCustody\":false,\"productionQualified\":false,\"revoked\":true,\"keyset\":\"" (kg-field state 1) "\",\"head\":\"" (kg-field state 2) "\",\"epoch\":" (kg-field state 3) "}\n"))
+    :else
+      (let [logged (kh-log-refusal root config command "host/keyset-revoked" (kg-hash command))]
+        (kc-error "keyset revoked by its guardians; no permit or signature is issued"))))
 (defn kh-operate [command :string root :string] :i64
   (let [config (kh-read root "config") state (kh-state root config)
         policy (kh-read root "policy") journal (kh-read root "journal")
-        cursor (kh-cursor journal config state policy) now (kh-now)]
+        revoked (and (= (kg-state-problem state) "") (= (kg-field state 4) "revoked"))
+        cursor (if revoked "" (kh-cursor journal config state policy)) now (kh-now)]
     (cond
+      revoked
+        (kh-revoked command root config state)
       (or (not (kh-ready? state policy cursor)) (< now (kg-number (kg-field cursor 2))))
         (kc-error "host state/proof/journal/clock refused")
       ;; Operator halt (S0-f). A halt file stops every permit and signature; the
@@ -350,9 +394,10 @@
           (and (or (= command "status-local") (= command "export-local") (= command "audit-local") (= command "audit-refusals-local")) (not= root "") (= (kc-arg 2) "")) (kh-operate command root)
           (and (= command "permit-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 4) "")) (kh-operate command root)
           (and (= command "halt-local") (not= root "") (= (kc-arg 2) "")) (arena-scope (kh-halt root))
+          (and (= command "revoke-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-revoke root))
           (and (= command "sign-binding-local") (not= root "") (not= (kc-arg 4) "") (= (kc-arg 5) "")) (arena-scope (kh-operate command root))
           (and (= command "bind-local") (not= root "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
           (and (= command "permit-funds-local") (not= root "") (not= (kc-arg 6) "") (= (kc-arg 7) "")) (arena-scope (kh-operate command root))
           (and (= command "sign-funds-local") (not= root "") (not= (kc-arg 2) "") (= (kc-arg 3) "")) (arena-scope (kh-operate command root))
           (and (or (= command "sign-local") (= command "sign-local-line")) (not= root "") (not= (kc-arg 2) "") (not= (kc-arg 3) "") (= (kc-arg 4) "")) (arena-scope (kh-operate command root))
-          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local | halt-local | audit-refusals-local; no legacy keys"))))
+          :else (kc-error "native local host: init-local | status-local | permit-local | sign-local | permit-funds-local | sign-funds-local | sign-binding-local | bind-local | halt-local | revoke-local | audit-refusals-local; no legacy keys"))))
