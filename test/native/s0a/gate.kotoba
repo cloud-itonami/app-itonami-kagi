@@ -1,0 +1,15 @@
+(ns kagi.agent-signer-gate (:export [main]))
+(defn cg-report [name :string ok :bool] :i64
+  (let [out (typed-cap-call 37 :string :string (str (if ok "PASS " "FAIL ") name "\n"))] (if ok 1 0)))
+(defn s0-sig [seed :vector-i64 text :string] :string
+  (let [out (bzero 64) r (sign-into out seed (kg-bytes text))] (hex out)))
+(defn s0-case [i :string] :i64
+  (let [seed (hex-bytes (kg-v "seed"))
+        body (kg-v (str "body-" i)) tid (kg-v (str "tid-" i))]
+    (+ (cg-report (str "case " i " sha256(canonical body) matches oracle") (= (sha256-hex (kg-bytes body)) (kg-v (str "digest-" i))))
+    (+ (cg-report (str "case " i " Ed25519 over transfer-id text matches oracle") (= (s0-sig seed tid) (kg-v (str "sig-" i))))
+       (cg-report (str "case " i " signature over another case does not match") (not (= (s0-sig seed (kg-v "tid-1")) (kg-v "sig-0"))))))))
+(defn main [] :i64
+  (let [seed (hex-bytes (kg-v "seed"))]
+    (+ (cg-report "public key from seed matches oracle" (= (hex (public-from-seed seed)) (kg-v "pub")))
+    (+ (s0-case "0") (s0-case "1")))))

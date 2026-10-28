@@ -1,0 +1,15 @@
+;; S0-a native vectors from test/native/engi_transfer_vectors.json. PUBLIC RFC 8032 seed, NOT a live key.
+(ns kagi.agent-signer-vectors (:export [kg-v]))
+(defn kg-v [name :string] :string
+  (cond
+    (= name "seed") "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"
+    (= name "pub") "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a"
+    (= name "body-0") "engi/transfer-body\nspender=did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\nreceiver=did:key:z6MkiaMbhXHNA4eJVCCj8dbzKzTgYDKf6crKgHVHid1F1WCT\namount=1\nspender-prev=nil\nnonce=n0\nts=1000\n"
+    (= name "digest-0") "1317c279b996eca7ffb0ee8f6086dda490941ba4d05336ffca5f6701e9e2cebf"
+    (= name "tid-0") "bafyreiatc7bhtomw5st77mhor5qinxnesckbxjgqkm3p7ss7m4a6tywox4"
+    (= name "sig-0") "484f8c2dab5e25ea5d4b2f5b25c6cbb2f95b2da2f444ad57e01f99709be81769d7bf243eb41f6e79fe19d1a3ab98ee4011012cb82ca854f27149a16c63617203"
+    (= name "body-1") "engi/transfer-body\nspender=did:key:z6MktwupdmLXVVqTzCw4i46r4uGyosGXRnR3XjN4Zq7oMMsw\nreceiver=did:key:z6MkiaMbhXHNA4eJVCCj8dbzKzTgYDKf6crKgHVHid1F1WCT\namount=15\nspender-prev=bafy-prev\nnonce=n1\nts=2000\n"
+    (= name "digest-1") "3ac4b948574f4b048a7ca31a2a8bc705e603b033061b8e45429f7ab77fb92806"
+    (= name "tid-1") "bafyreib2ys4uqv2pjmciu7fddivixryf4yb3amygdohekqu7pk3x7ojiay"
+    (= name "sig-1") "fef4423b71530bb20dc12c31e53cb4d764d81d6074173cf58791f0c8f91ae5745036187daba2e70ac6e7491ad0dd3873a74a7d013741fa953c0790037125ec05"
+    :else ""))
