@@ -1,0 +1,82 @@
+{
+  "schema": "kagi.native-funds-host.build.v1",
+  "target": "aarch64-linux-static",
+  "compilerSha256": "bcebb8885966e325b93868f8b29274a961233811dc5793ce12d26a2afc4803f4",
+  "ownerSha256": {
+    "sha2": "2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888",
+    "ed25519": "47c086f3d93ad4f6da047bbf3b9250f7e4fbc7539ec1a0077abb2d82ceb3dc14"
+  },
+  "sourceDigests": {
+    "kotoba/kagi/agent_signer.kotoba": "28055138d20d9f0b957802cbbaaeaa3e2d02b3241c50ceb50313af15310fdd99",
+    "kotoba/kagi/cli.kotoba": "5848aa363aae2168b390705ef8b311047c625b07d62478a68cd83837359bc7b4",
+    "kotoba/kagi/host.kotoba": "99360ef206465443d70dd37bcceccda8e908ebec29f8aad2a34573a2a7e79f1a",
+    "kotoba/kagi/assemble.kotoba": "1a3470b626de68bcd005390ea6462090957e934c0c3542b1f9f2147bfbfe5972"
+  },
+  "nativeAssemblerSha256": "537b0e78be864ea808be16a862c353b3afee9e7122b52e167e832de03d566e08",
+  "assembly": {
+    "host": "d3910fec035e7f7e240803c63c7d5e5558a3420904fc0fe3fb080811032e9000",
+    "coreGate": "2993c4639f26739f92faf112bbd17d75a0cca7cea4512fe7a8023328d0bc7b2b"
+  },
+  "hostArtifactSha256": "736081c9bf97ac0acfb1ed29bf96acc465c13a016f8bce13fdef66396e8d7073",
+  "coreGates": {
+    "core": {
+      "pass": 32,
+      "fail": 0,
+      "artifactSha256": "aa22bb95387ca46d14d6b8681cc0069ae5a7c8b21075f2a347462402cf13af8d"
+    },
+    "s0a": {
+      "pass": 7,
+      "fail": 0,
+      "artifactSha256": "5155b26184e0c2bcd60d9084cce290d2c050a8c65e01ea3062e548bd8a035a8a"
+    },
+    "s0b": {
+      "pass": 8,
+      "fail": 0,
+      "artifactSha256": "bcc4d722abc38c598713037000e893fe475c559a0b6a7c2b6e31687293a5ed16"
+    },
+    "s0c": {
+      "pass": 35,
+      "fail": 0,
+      "artifactSha256": "8d30985f6d8cbe67037c638cf7a544b6bacc67b95774ee54dab27477fae419fd"
+    }
+  },
+  "hostGates": {
+    "hostGate": {
+      "passed": true,
+      "count": 16
+    },
+    "agentHostGate": {
+      "passed": true,
+      "count": 7
+    },
+    "fundsHostGate": {
+      "passed": true,
+      "count": 29
+    },
+    "isolationGate": {
+      "passed": true,
+      "count": 9
+    }
+  },
+  "localSoftwareOnly": true,
+  "productionQualified": false,
+  "independentCustody": false,
+  "projectLinkQualified": false,
+  "cdciQualified": false,
+  "record": {
+    "purpose": "Reproducible record of the native funds host and every gate built from this source (JUN-501 S0, ADR 0021).",
+    "relationTo": "native-local-host.lock.json remains the JUN-299 record of the agent/node host. This file pins the funds-capable source; the two hosts differ.",
+    "howToVerify": "python3 -I test/native/funds_lock.py --compiler amu-root --owners DIR --build NEW_DIR --measured OUT.json --verify native-funds-host.lock.json (arm64 Linux, from the repository root). It checks the compiler and owner pins first.",
+    "gateExitCodes": "the 32-case core gate and the s0a/s0b/s0c suites exit with their pass count; the lock records counts, not exit codes",
+    "notes": "nativeAssemblerSha256 differs from the JUN-299 lock because that assembler was built by an earlier compiler; its source digest is unchanged. The host gates draw fresh native entropy, so only counts and the host artifact digest are pinned.",
+    "doesNotQualify": [
+      "production custody",
+      "independent guardian",
+      "secret-memory erasure",
+      "constant-time signing",
+      "project link / CDCI",
+      "distributed keyset-head freshness (JUN-300)",
+      "ENGI submission and counter-signature"
+    ]
+  }
+}
