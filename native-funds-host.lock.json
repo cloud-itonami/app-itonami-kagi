@@ -9,15 +9,15 @@
   "sourceDigests": {
     "kotoba/kagi/agent_signer.kotoba": "2b7a4d77dec0a047c304b52bab77ca9c12728e9ac3c2325d623e4f9f8d9896b1",
     "kotoba/kagi/cli.kotoba": "5848aa363aae2168b390705ef8b311047c625b07d62478a68cd83837359bc7b4",
-    "kotoba/kagi/host.kotoba": "2c2c17dbe89e07ca0b534e226a9b7608cd238e1eb786e81fba9d673371e07c7e",
+    "kotoba/kagi/host.kotoba": "c20ed2e8901dc564db5228b56e64976129f3c1cbc2b78c0f4f314c8eee654d83",
     "kotoba/kagi/assemble.kotoba": "1a3470b626de68bcd005390ea6462090957e934c0c3542b1f9f2147bfbfe5972"
   },
   "nativeAssemblerSha256": "537b0e78be864ea808be16a862c353b3afee9e7122b52e167e832de03d566e08",
   "assembly": {
-    "host": "6cf47f13911fc21251c65ab634949d04460143c15e5b84d8a09666d7f22c4ef5",
+    "host": "ee6f3cda794dd73e5fa95b5f594eceaeb59396d77a624d05dd4c5df120f2c59f",
     "coreGate": "0dc9b913a46e7ba3ce7b9eebc7b41505496af8a3a0130f52383e50452b6d61fb"
   },
-  "hostArtifactSha256": "d3f4f6b9d932f46099a4b1d4fad9e4f7b6e3516106b8b050b02e2e9444c98042",
+  "hostArtifactSha256": "fb2b78ce5821cb5d5d41b0004a9eb008f28e78eea059fd410cf70b2fc51e87f3",
   "coreGates": {
     "core": {
       "pass": 32,
@@ -51,7 +51,7 @@
     },
     "fundsHostGate": {
       "passed": true,
-      "count": 34
+      "count": 50
     },
     "isolationGate": {
       "passed": true,
