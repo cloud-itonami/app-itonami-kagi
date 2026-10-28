@@ -304,6 +304,46 @@ body.write_text('local cell operation digest fixture\n')
 run('permit-local', root, body, 'cell-action', expected=2)
 passed('funds and agent roots do not cross: no funds permit or signature from an agent root, no cell-action from a funds root')
 
+# ---- refusal log (JUN-549) -------------------------------------------------------------------
+log = run('audit-refusals-local', root).strip().split('\n')
+assert log[0].startswith('kagi.host.refusals.v1 ')
+entries = [l.split(' ') for l in log[1:]]
+assert [e[3] for e in entries] == ['host/not-bound', 'limits/not-allowlisted', 'limits/per-transaction', 'transfer/fields',
+                                   'transfer/self', 'signer/writer-fence-parent', 'signer/writer-fence-parent',
+                                   'host/not-bound', 'limits/daily', 'limits/daily'], [e[3] for e in entries]
+assert {e[2] for e in entries} == {'permit-funds-local', 'sign-funds-local'}
+assert all(len(e) == 6 and len(e[4]) == 64 and len(e[5]) == 64 for e in entries)
+text = (root / 'refusals').read_text()
+assert not any(secret in text for secret in [(root / 'author.seed').read_text().strip(), allow.read_text().strip()])
+assert (root / 'refusals').stat().st_mode & 0o077 == 0
+passed('every refused funds request is logged with a named reason, in order, and the log holds no seed or allowlist')
+
+saved_log = (root / 'refusals').read_text()
+rows = saved_log.split('\n')
+(root / 'refusals').write_text('\n'.join(rows[:3] + rows[4:]))                       # drop a middle entry
+run('audit-refusals-local', root, expected=2)
+(root / 'refusals').write_text(saved_log.replace('limits/not-allowlisted', 'limits/per-transaction', 1))   # rewrite a reason
+run('audit-refusals-local', root, expected=2)
+(root / 'refusals').write_text(saved_log)
+run('audit-refusals-local', root)
+passed('removing or rewriting an entry of the refusal log is detected by the hash chain')
+
+journal_before = journal()
+request(root, RECEIVER, '1', 'n9', prev=r3['transferId'], ts='9000', expected=2)           # refused: daily cap
+assert journal() == journal_before and json.loads(run('status-local', root))['sequence'] == 3
+passed('refusing a request leaves the signing journal, sequence and spent untouched')
+
+# a flood of refused requests cannot fill the disk: the log stops at 256 entries with a marker
+before_f3 = (funds3 / 'journal').read_bytes()
+for i in range(300):
+    request(funds3, STRANGER, '1', 'f%d' % i, ts='6000', expected=2)
+flood = (funds3 / 'refusals').read_text().strip().split('\n')
+assert len(flood) == 1 + 256 and flood[-1].split(' ')[3] == 'log/capacity-reached', len(flood)
+assert (funds3 / 'refusals').stat().st_size < 65536
+run('audit-refusals-local', funds3)
+assert (funds3 / 'journal').read_bytes() == before_f3
+passed('300 refused requests leave exactly 256 log entries ending in a capacity marker, and the file stays under 64 KiB')
+
 # ---- operator halt / kill switch (S0-f), on the bound funds3 root ----------------------------
 hline = request(funds3, RECEIVER, '1', 'nh', prev='nil', ts='5000')      # a valid permit, issued before the halt
 before3 = (funds3 / 'journal').read_bytes()
@@ -323,6 +363,12 @@ passed('halting twice is refused: the host only ever creates the halt file')
 resumed = json.loads(sign(funds3, hline))
 assert resumed['sequence'] == 1 and openssl_verify(f3['author'], resumed['transferId'], resumed['signature'])
 passed('the same request signs once the operator removes the halt file, so the halt was the only thing refusing it')
+
+assert json.loads(run('halt-local', funds2))['halted'] is True
+request(funds2, RECEIVER, '1', 'nh', expected=2)
+h2 = run('audit-refusals-local', funds2).strip().split('\n')
+assert [l.split(' ')[3] for l in h2[1:]] == ['host/halted']
+passed('a request refused because the host is halted is logged as host/halted')
 
 report = {'schema': 'kagi.native.funds-host.gate.v1', 'host': platform.machine(),
           'artifactSha256': hashlib.sha256(a.artifact.read_bytes()).hexdigest(),

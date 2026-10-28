@@ -6,7 +6,7 @@
 (ns kagi.agent-signer
   (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
             kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign
-            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer-hex kg-sign-transfer kg-binding-statement kg-binding-message kg-binding-problem])
+            kg-did-key? kg-did-of kg-funds-limits-problem kg-funds-limits-ok? kg-transfer-problem kg-transfer-body kg-transfer-id kg-sign-transfer-hex kg-sign-transfer kg-binding-statement kg-binding-message kg-binding-problem])
   (:require [sha2.core :refer [sha256-hex hex]]
             [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
 
@@ -269,34 +269,45 @@
 ;; equal the pinned digest, and the receiver must appear as a whole line. The host
 ;; supplies `spent`, the amount already signed in the current window, from its
 ;; journal; this pure function neither keeps nor resets it.
+(defn kg-funds-limits-problem [policy :string receiver :string amount :i64 allowlist :string spent :i64] :string
+  (cond (or (< amount 1) (< spent 0)) "limits/amount"
+        (> amount (kg-number (kg-field policy 7))) "limits/per-transaction"
+        (> (+ spent amount) (kg-number (kg-field policy 8))) "limits/daily"
+        (> (string-length allowlist) 4096) "limits/allowlist-size"
+        (not= (kg-hash allowlist) (kg-field policy 9)) "limits/allowlist-digest"
+        (< (string-index-of allowlist (str "\n" receiver "\n")) 0) "limits/not-allowlisted"
+        :else ""))
 (defn kg-funds-limits-ok? [policy :string receiver :string amount :i64 allowlist :string spent :i64] :bool
-  (and (>= amount 1) (>= spent 0)
-       (<= amount (kg-number (kg-field policy 7)))
-       (<= (+ spent amount) (kg-number (kg-field policy 8)))
-       (<= (string-length allowlist) 4096)
-       (= (kg-hash allowlist) (kg-field policy 9))
-       (>= (string-index-of allowlist (str "\n" receiver "\n")) 0)))
+  (= (kg-funds-limits-problem policy receiver amount allowlist spent) ""))
 ;; Output: the Ed25519 signature over the transfer-id text (the ENGI
 ;; self-sig) as hex (kg-sign-transfer: base64url), or empty on any refusal.
 ;; Persistence of replay state is the host's.
+(defn kg-transfer-problem [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
+                           last-sequence :i64 fence :i64 parent :string
+                           receiver :string amount :string spender-prev :string nonce :string ts :string
+                           allowlist :string spent :i64] :string
+  (cond (not= (vector-count seed) 32) "transfer/seed"
+        (not= (kg-field policy 1) "funds") "transfer/role"
+        (not= (kg-field permit 4) "en-transfer") "transfer/purpose"
+        (not= (kg-permit-problem state policy permit signature now last-sequence fence parent) "")
+          (kg-permit-problem state policy permit signature now last-sequence fence parent)
+        (not= (hex (public-from-seed seed)) (kg-field state 5)) "transfer/author-key"
+        (not (kg-did-key? receiver)) "transfer/receiver"
+        (= receiver (kg-did-of (kg-field state 5))) "transfer/self"
+        (not (and (> (kg-number amount) 0) (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? spender-prev))) "transfer/fields"
+        (not= (kg-funds-limits-problem policy receiver (kg-number amount) allowlist spent) "")
+          (kg-funds-limits-problem policy receiver (kg-number amount) allowlist spent)
+        (not= (kg-hash (kg-transfer-body (kg-did-of (kg-field state 5)) receiver amount spender-prev nonce ts)) (kg-field permit 7)) "transfer/body-digest"
+        :else ""))
 (defn kg-sign-transfer-hex [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
-                        last-sequence :i64 fence :i64 parent :string
-                        receiver :string amount :string spender-prev :string nonce :string ts :string
-                        allowlist :string spent :i64] :string
-  (if (or (not= (vector-count seed) 32)
-          (not= (kg-field policy 1) "funds")
-          (not= (kg-field permit 4) "en-transfer")
-          (not= (kg-permit-problem state policy permit signature now last-sequence fence parent) "")) ""
-    (let [public (hex (public-from-seed seed))]
-      (if (not= public (kg-field state 5)) ""
-        (let [spender (kg-did-of public)]
-          (if (not (and (kg-did-key? receiver) (not= receiver spender) (> (kg-number amount) 0)
-                        (>= (kg-number ts) 0) (kg-label? nonce) (kg-label? spender-prev)
-                        (kg-funds-limits-ok? policy receiver (kg-number amount) allowlist spent))) ""
-            (let [body (kg-transfer-body spender receiver amount spender-prev nonce ts)]
-              (if (not= (kg-hash body) (kg-field permit 7)) ""
-                (let [output (kg-vzero 64) result (sign-into output seed (kg-bytes (kg-transfer-id body)))]
-                  (if (= result 0) (hex output) ""))))))))))
+                            last-sequence :i64 fence :i64 parent :string
+                            receiver :string amount :string spender-prev :string nonce :string ts :string
+                            allowlist :string spent :i64] :string
+  (if (not= (kg-transfer-problem seed state policy permit signature now last-sequence fence parent
+                                 receiver amount spender-prev nonce ts allowlist spent) "") ""
+    (let [body (kg-transfer-body (kg-did-of (kg-field state 5)) receiver amount spender-prev nonce ts)
+          output (kg-vzero 64) result (sign-into output seed (kg-bytes (kg-transfer-id body)))]
+      (if (= result 0) (hex output) ""))))
 (defn kg-sign-transfer [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
                         last-sequence :i64 fence :i64 parent :string
                         receiver :string amount :string spender-prev :string nonce :string ts :string
