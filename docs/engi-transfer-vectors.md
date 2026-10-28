@@ -43,12 +43,31 @@ SHA-256 of the canonical TransferBody and the Ed25519 signature over the
 transfer-id text all equal the oracle. A mutation (one hex digit of one
 signature changed) gives 6 of 7 with exactly that case failing.
 
+## S0-b: text encodings derived natively (2026-10-28)
+
+`sh test/native/s0a_gate.sh COMPILER OWNERS NEW_BUILD_DIR s0b` (same pinned
+compiler and owners; artifact SHA-256
+`af1d0cf993ba23bbfcf1a27dd39e88d583183624c08f43c2c5819f2687d5b213`, assembly
+`eca3a72a5d081a95ace94e2e3997c2f1414a47bd710cb514a5fdbd16811dd70e`) computes
+in native code, from the canonical TransferBody text and the public seed:
+
+- the transfer-id (`b` + base32-lower of the CID header and SHA-256),
+- the did:key (base58btc of `0xed 0x01 || pub`),
+- the base64url Ed25519 signature over the transfer-id text,
+
+and compares each with the ENGI vector. 8 of 8 pass (including a leading-zero
+base58 case and a negative control that an altered body gives another
+transfer-id). A mutation of one transfer-id character in the vector fails
+exactly the two checks of that case (6 of 8 pass). The S0-a suite still
+passes through the same script with the unchanged artifact digest.
+
+The codec functions live in the gate file only (a prototype for the funds
+role); moving them into the signer needs an assembler and lock update (S0-c).
+
 ## What is not established
 
-- Base32/base58btc/base64url, i.e. computing the transfer-id and did:key
-  text natively from the TransferBody (JUN-501 S0-b). The gate checks the
-  signature over the transfer-id text given by the vector, not the CID text
-  derived natively.
+- The canonical TransferBody is taken as the vector's text; assembling it
+  from receiver, amount, nonce and ts inside the signer is part of S0-c.
 - The funds role, its own signing domain, policy limits and the mutual
   binding (S0-c to S0-e) are not implemented.
 - This is not custody evidence: the build runs on a development VM with
