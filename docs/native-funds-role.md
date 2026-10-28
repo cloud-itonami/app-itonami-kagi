@@ -195,7 +195,7 @@ arm64 Linux VM. Gate: `sh test/native/s0a_gate.sh COMPILER OWNERS NEW_DIR s0c`
 (vectors from `test/native/s0c/gen_vectors.py`, an OpenSSL/hashlib oracle that
 first reproduces the pinned agent genesis digest and proof).
 
-- Funds gate: 35 of 35 pass. Policy admission (role/purpose, old shape, cap
+- Funds gate: 36 of 36 pass. Policy admission (role/purpose, old shape, cap
   above daily, zero cap, bad digest); the ENGI signature match and the
   transfer-id and did:key built in the signer; action-domain refusal and
   agent-role refusal; changed amount, smuggled or spaced receiver (also when the
@@ -205,7 +205,10 @@ first reproduces the pinned agent genesis digest and proof).
   negative `spent`, a permit-committed amount above the per-transaction cap,
   a forged allowlist that still lists the receiver, an empty allowlist, a
   receiver missing from the pinned list, and an entry that only extends the
-  receiver.
+  receiver. A policy that loosens the limits (cap 1000 / daily 2000) but is not
+  the one the keyset pins is refused (`signer/policy-pin`), so neither the
+  caller, the delegate nor the host can raise a limit; removing that check fails
+  exactly this case.
 - Mutations, each failing only the check that guards it: dropping the
   body-digest binding; letting `kg-sign` accept funds; dropping the receiver
   screen (first missed because the digest binding hid it, so a permit-committed
