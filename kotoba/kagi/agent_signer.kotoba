@@ -6,7 +6,7 @@
 (ns kagi.agent-signer
   (:export [kg-hash kg-field kg-number kg-event kg-state-problem kg-keyset-problem
             kg-apply kg-policy-problem kg-permit-problem kg-permit-message kg-sign
-            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer])
+            kg-did-key? kg-did-of kg-funds-limits-ok? kg-transfer-body kg-transfer-id kg-sign-transfer-hex kg-sign-transfer])
   (:require [sha2.core :refer [sha256-hex hex]]
             [ed25519.selfhost :refer [verify? sign-into public-from-seed hex-bytes]]))
 
@@ -276,9 +276,10 @@
        (<= (string-length allowlist) 4096)
        (= (kg-hash allowlist) (kg-field policy 9))
        (>= (string-index-of allowlist (str "\n" receiver "\n")) 0)))
-;; Output: base64url Ed25519 signature over the transfer-id text (the ENGI
-;; self-sig), or empty on any refusal. Persistence of replay state is the host's.
-(defn kg-sign-transfer [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
+;; Output: the Ed25519 signature over the transfer-id text (the ENGI
+;; self-sig) as hex (kg-sign-transfer: base64url), or empty on any refusal.
+;; Persistence of replay state is the host's.
+(defn kg-sign-transfer-hex [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
                         last-sequence :i64 fence :i64 parent :string
                         receiver :string amount :string spender-prev :string nonce :string ts :string
                         allowlist :string spent :i64] :string
@@ -295,4 +296,11 @@
             (let [body (kg-transfer-body spender receiver amount spender-prev nonce ts)]
               (if (not= (kg-hash body) (kg-field permit 7)) ""
                 (let [output (kg-vzero 64) result (sign-into output seed (kg-bytes (kg-transfer-id body)))]
-                  (if (= result 0) (kg-b64u output) ""))))))))))
+                  (if (= result 0) (hex output) ""))))))))))
+(defn kg-sign-transfer [seed :vector-i64 state :string policy :string permit :string signature :string now :i64
+                        last-sequence :i64 fence :i64 parent :string
+                        receiver :string amount :string spender-prev :string nonce :string ts :string
+                        allowlist :string spent :i64] :string
+  (let [h (kg-sign-transfer-hex seed state policy permit signature now last-sequence fence parent
+                                receiver amount spender-prev nonce ts allowlist spent)]
+    (if (= h "") "" (kg-b64u (hex-bytes h)))))
