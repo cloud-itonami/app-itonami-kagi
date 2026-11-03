@@ -1,0 +1,20 @@
+;; Experimental composition: validate a GitHub installation-token response,
+;; bind its reported expiry to a host-selected checkpoint lease, and seal the
+;; token to a recipient. The host authenticates the HTTP endpoint, pins repo ID
+;; and installation, authorizes principal/recipient, controls clock and random
+;; inputs, obtains issuer signature, and handles secret lifetime. This is not a
+;; network client, credential issuer, replay ledger or qualified secret host.
+(ns kagi.github-issuance-envelope
+  (:require [kagi.github-token-response :as response] [kagi.credential-envelope :as envelope])
+  (:export [github-checkpoint-seal-response]))
+
+(defn github-checkpoint-seal-response [body :vector-i64 status :i64 repo-id :i64 now-ms :i64
+                                      recipient :vector-i64 principal :string audience :string lease-id :string
+                                      ephemeral :vector-i64 message-random :vector-i64 nonce :vector-i64] :vector-i64
+  (let [expiry (response/github-checkpoint-token-expiry body status repo-id now-ms)]
+    (if (< expiry 0) (vector-i64)
+      (let [context (envelope/github-checkpoint-context principal audience lease-id now-ms expiry)]
+        (if (= (vector-count context) 0) (vector-i64)
+          (let [token (response/github-checkpoint-token body status repo-id now-ms)]
+            (if (= (vector-count token) 0) (vector-i64)
+              (envelope/credential-seal recipient context token ephemeral message-random nonce))))))))

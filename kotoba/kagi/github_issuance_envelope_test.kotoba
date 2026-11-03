@@ -1,0 +1,40 @@
+;; End-to-end synthetic response -> seal -> sign -> lease open; no HTTP.
+(ns kagi.github-issuance-envelope-test
+  (:require [kagi.github-issuance-envelope :as i] [kagi.credential-envelope :as e]
+            [x25519.core :as x] [mlkem.core :as k] [ed25519.selfhost :as ed])
+  (:export [main]))
+(defn- gi-fill [n :i64 v :i64] :vector-i64
+  (loop [i 0 b (vector-alloc n)] (if (= i n) b (recur (+ i 1) (vector-assoc! b i v)))))
+(defn- gi-slice [v :vector-i64 start :i64 n :i64] :vector-i64
+  (loop [i 0 out (vector-alloc n)] (if (= i n) out (recur (+ i 1) (vector-assoc! out i (vector-at v (+ start i)))))))
+(defn- gi-cat [a :vector-i64 b :vector-i64] :vector-i64
+  (let [n (vector-count a) m (vector-count b)]
+    (loop [i 0 out (vector-alloc (+ n m))] (if (= i (+ n m)) out
+      (recur (+ i 1) (vector-assoc! out i (if (< i n) (vector-at a i) (vector-at b (- i n)))))))))
+(defn- gi-eq [a :vector-i64 b :vector-i64] :bool
+  (and (= (vector-count a) (vector-count b)) (loop [i 0] (if (= i (vector-count a)) true
+    (if (= (vector-at a i) (vector-at b i)) (recur (+ i 1)) false)))))
+(defn- gi-response [selection :string expiry :string] :vector-i64
+  (vector-i64-from-bytes (string-to-utf8
+    (str "{\"token\":\"synthetic-token\",\"expires_at\":\"" expiry
+         "\",\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"},\"repository_selection\":\""
+         selection "\",\"repositories\":[{\"id\":123,\"full_name\":\"cloud-itonami/itonami-bot-state\",\"private\":true}]}"))))
+(defn main [] :i64
+  (let [now 1793664000000 expires 1793665800000 xs (gi-fill 32 3)
+        kp (k/keygen (gi-fill 32 1) (gi-fill 32 2)) dk (gi-slice kp 1184 2400)
+        recipient (gi-cat (x/public-key xs) (gi-slice kp 0 1184))
+        id "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        box (i/github-checkpoint-seal-response (gi-response "selected" "2026-11-03T00:30:00Z") 201 123 now recipient
+                                               "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))
+        context (e/github-checkpoint-context "bot-one" "host-one" id now expires)
+        seed (gi-fill 32 9) issuer (ed/public-from-seed seed) sig (gi-fill 64 0)
+        signed (ed/sign-into sig seed (e/credential-signing-message recipient context box))
+        a (and (= signed 0) (gi-eq (e/github-checkpoint-open recipient box issuer sig xs dk "bot-one" "host-one" id now expires now)
+                                   (vector-i64-from-bytes (string-to-utf8 "synthetic-token"))))
+        b (= (vector-count (i/github-checkpoint-seal-response (gi-response "all" "2026-11-03T00:30:00Z") 201 123 now recipient
+                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)
+        c (= (vector-count (i/github-checkpoint-seal-response (gi-response "selected" "2026-11-03T00:00:00Z") 201 123 now recipient
+                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)
+        d (= (vector-count (i/github-checkpoint-seal-response (gi-response "selected" "2026-11-03T00:30:00Z") 200 123 now recipient
+                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0))))

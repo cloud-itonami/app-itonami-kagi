@@ -1,0 +1,7 @@
+KSL1
+entry /groupb/src/pq/entry.kotoba
+root /groupb/src
+file f8af2953904bd0a96e7b5c3b9e34151bcae3754e5358669adb8ac289acc0872f /groupb/src/jcs/reader.kotoba
+file ed7fee157d0299f5041e144ad1868fd97dbb1ff5e547c20a89435d652402f047 /groupb/src/kagi/github_token_response.kotoba
+file c4bf5e1abe9ce10b89a6ed20ddecd2b42668e658b736be85635201a9e16c6016 /groupb/src/kagi/github_token_response_test.kotoba
+file 4e4adcbe92d591389fa561a611e6ebecf8bb3d35c434b2b90258be34336e7a1d /groupb/src/pq/entry.kotoba
