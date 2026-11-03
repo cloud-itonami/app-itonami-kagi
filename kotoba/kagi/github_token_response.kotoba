@@ -1,0 +1,70 @@
+;; GitHub App installation-token response validation candidate (AWAI-71).
+;; The host MUST pin the installation, repository ID, authenticated HTTPS
+;; endpoint, clock and issuer policy. This module performs no HTTP request,
+;; authentication, token revocation, logging or secure process delivery.
+;; Tokens and response bytes must never be sent to model context or logs.
+(ns kagi.github-token-response
+  (:require [jcs.reader :as j])
+  (:export [github-checkpoint-token-request github-checkpoint-token-expiry github-checkpoint-token]))
+
+;; Never omit either repository or permissions: GitHub otherwise defaults to
+;; the installation's entire granted scope. Host pins POST's installation ID.
+(defn github-checkpoint-token-request [] :string
+  "{\"repositories\":[\"itonami-bot-state\"],\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"}}")
+(defn- gt-byte [b :vector-i64 i :i64] :i64
+  (if (and (>= i 0) (< i (vector-count b))) (vector-at b i) -1))
+(defn- gt-root [b :vector-i64] :i64
+  (loop [i 0] (let [c (gt-byte b i)]
+    (if (or (= c 32) (= c 9) (= c 10) (= c 13)) (recur (+ i 1)) i))))
+(defn- gt-str [b :vector-i64 obj :i64 key :string] :string
+  (let [i (j/json-member b obj key)] (if (= (j/json-kind b i) 3) (j/json-string b i) "")))
+(defn- gt-dec [s :vector-i64 start :i64 n :i64] :i64
+  (loop [i 0 x 0] (if (= i n) x
+    (let [c (gt-byte s (+ start i))]
+      (if (and (>= c 48) (<= c 57)) (recur (+ i 1) (+ (* x 10) (- c 48))) -1)))))
+(defn- gt-month-days [y :i64 m :i64] :i64
+  (cond (= m 2) (if (= (rem y 4) 0) 29 28)
+        (or (= m 4) (= m 6) (= m 9) (= m 11)) 30 :else 31))
+;; GitHub documented UTC seconds form. Reject unsupported years, offsets,
+;; fractional seconds, leap seconds and impossible calendar dates.
+(defn- gt-expiry [s :string] :i64
+  (let [b (vector-i64-from-bytes (string-to-utf8 s)) y (gt-dec b 0 4) m (gt-dec b 5 2) d (gt-dec b 8 2)
+        h (gt-dec b 11 2) minute (gt-dec b 14 2) second (gt-dec b 17 2)]
+    (if (or (not (= (vector-count b) 20)) (not (= (gt-byte b 4) 45)) (not (= (gt-byte b 7) 45))
+            (not (= (gt-byte b 10) 84)) (not (= (gt-byte b 13) 58)) (not (= (gt-byte b 16) 58))
+            (not (= (gt-byte b 19) 90)) (< y 2000) (> y 2099) (< m 1) (> m 12)
+            (< d 1) (> d (gt-month-days y m)) (< h 0) (> h 23) (< minute 0) (> minute 59)
+            (< second 0) (> second 59)) -1
+      (let [years (loop [i 1970 days 0] (if (= i y) days
+                    (recur (+ i 1) (+ days (if (= (rem i 4) 0) 366 365)))))
+            months (loop [i 1 days 0] (if (= i m) days (recur (+ i 1) (+ days (gt-month-days y i)))))
+            days (+ (+ years months) (- d 1))]
+        (* (+ (+ (* days 86400) (* h 3600)) (+ (* minute 60) second)) 1000)))))
+(defn- gt-token? [v :vector-i64] :bool
+  ;; Do not assume the historical fixed GitHub token length or prefix.
+  (and (> (vector-count v) 0) (<= (vector-count v) 4096)
+    (loop [i 0] (if (= i (vector-count v)) true
+      (let [c (vector-at v i)] (if (and (>= c 33) (<= c 126)) (recur (+ i 1)) false))))))
+(defn- gt-valid? [b :vector-i64 status :i64 repo-id :i64 now-ms :i64] :bool
+  (let [root (gt-root b)]
+    (and (= status 201) (> repo-id 0) (>= now-ms 0) (<= (vector-count b) 65536) (j/json-valid? b)
+         (= (j/json-kind b root) 1)
+         (let [perms (j/json-member b root "permissions") repos (j/json-member b root "repositories")
+               first (j/json-element b repos 0) id (j/json-member b first "id")
+               private (j/json-member b first "private") token (j/json-member b root "token")
+               expiry (gt-expiry (gt-str b root "expires_at"))]
+           (and (= (gt-str b root "repository_selection") "selected")
+                (= (j/json-kind b perms) 1) (= (j/json-count b perms) 2)
+                (= (gt-str b perms "contents") "write") (= (gt-str b perms "metadata") "read")
+                (= (j/json-kind b repos) 2) (= (j/json-count b repos) 1)
+                (= (j/json-kind b first) 1) (= (gt-str b first "full_name") "cloud-itonami/itonami-bot-state")
+                (= (j/json-kind b private) 5) (= (j/json-kind b id) 4) (j/json-int-ok? b id)
+                (= (j/json-int b id) repo-id) (= (j/json-kind b token) 3)
+                (gt-token? (j/json-string-bytes b token))
+                (> expiry now-ms) (<= (- expiry now-ms) 3600000))))))
+;; The host may use the validated reported expiry when constructing the
+;; signed lease context, never an invented later expiration.
+(defn github-checkpoint-token-expiry [b :vector-i64 status :i64 repo-id :i64 now-ms :i64] :i64
+  (if (gt-valid? b status repo-id now-ms) (gt-expiry (gt-str b (gt-root b) "expires_at")) -1))
+(defn github-checkpoint-token [b :vector-i64 status :i64 repo-id :i64 now-ms :i64] :vector-i64
+  (if (gt-valid? b status repo-id now-ms) (j/json-string-bytes b (j/json-member b (gt-root b) "token")) (vector-i64)))
