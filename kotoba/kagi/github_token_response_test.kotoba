@@ -32,8 +32,10 @@
         f (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x\\n" "2026-11-03T00:30:00Z") 201 123 now) -1)
         g (and (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-11-03T01:00:00Z") 201 123 now) (+ now 3600000))
                (= (vector-count (t/github-checkpoint-token
-                  (gt-response "selected" perms one "synthetic-token-with-variable-length-0123456789-0123456789-0123456789" "2026-11-03T00:30:00Z") 201 123 now)) 69))]
-    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if g 64 0))))
+                  (gt-response "selected" perms one "synthetic-token-with-variable-length-0123456789-0123456789-0123456789" "2026-11-03T00:30:00Z") 201 123 now)) 69))
+        h (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x\\u0079" "2026-11-03T00:30:00Z") 201 123 now) -1)
+        i (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x\\/y" "2026-11-03T00:30:00Z") 201 123 now) -1)]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if g 64 0) (if h 128 0) (if i 256 0))))
 
 (defn group-c [] :i64
   (let [now 1793664000000 one (str "[" (gt-repo) "]") perms (gt-perms)

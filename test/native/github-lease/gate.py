@@ -94,7 +94,7 @@ def main():
     token_unity = ('(ns kagi-token-response-native-test (:export [main]))\n' + source[0] + '\n' +
                    body(token_raw[0].decode('utf-8')).replace('j/', '') + '\n' +
                    body(token_raw[1].decode('utf-8')).replace('t/', '') +
-                   '\n(defn main [] :i64 (if (and (= (group-a) 255) (= (group-b) 127) (= (group-c) 7)) 0 1))\n')
+                   '\n(defn main [] :i64 (if (and (= (group-a) 255) (= (group-b) 511) (= (group-c) 7)) 0 1))\n')
     error_guard = '(< (json-member b root "error") 0)'
     if token_unity.count(error_guard) != 1:
         raise ValueError('token error guard changed')
