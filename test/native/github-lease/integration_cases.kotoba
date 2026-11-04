@@ -1,0 +1,28 @@
+;; Test-only envelope stubs: no encryption, key handling or issuer authority.
+(defn github-checkpoint-context [principal :string audience :string lease-id :string
+                                issued-ms :i64 expires-ms :i64] :vector-i64
+  (if (and (= principal "bot-one") (= audience "host-one") (= lease-id "lease-one")
+           (> issued-ms 0) (> expires-ms issued-ms)) [1] []))
+(defn credential-seal [recipient :vector-i64 context :vector-i64 plaintext :vector-i64
+                      ephemeral :vector-i64 message-random :vector-i64 nonce :vector-i64] :vector-i64
+  (if (and (= (vector-count context) 1)
+           (or (= (vector-count plaintext) 9) (= (vector-count plaintext) 4096))) [42] []))
+(defn- gi-repeat [n :i64] :string
+  (loop [i 0 out ""] (if (= i n) out (recur (+ i 1) (str out "x")))))
+(defn- gi-body [token :string] :vector-i64
+  (vector-i64-from-bytes (string-to-utf8
+    (str "{\"token\":\"" token "\",\"expires_at\":\"2026-11-03T00:30:00Z\","
+         "\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"},"
+         "\"repository_selection\":\"selected\",\"repositories\":[{\"id\":123,"
+         "\"full_name\":\"cloud-itonami/itonami-bot-state\",\"private\":true}]}"))))
+(defn test-approved-sealing [] :bool
+  (let [repo "cloud-itonami/itonami-bot-state" now 1793664000000 body (gi-body "synthetic")
+        empty (vector-alloc 0)]
+    (and (= (vector-count (github-checkpoint-seal-approved body 201 now [3600 3600 123] repo "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 1)
+         (= (vector-count (github-checkpoint-seal-approved body 201 now [3600 3600 123] "cloud-itonami/other" "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 0)
+         (= (vector-count (github-checkpoint-seal-approved body 201 now [3600 3600 123] repo "bot-one" false empty "bot-one" "host-one" "lease-one" empty empty empty)) 0)
+         (= (vector-count (github-checkpoint-seal-approved body 201 now [3600 3600 123] repo "bot-two" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 0)
+         (= (vector-count (github-checkpoint-seal-approved body 201 now [3600 60 123] repo "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 0)
+         (= (vector-count (github-checkpoint-seal-approved body 201 0 [3600 3600 123] repo "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 0)
+         (= (vector-count (github-checkpoint-seal-approved (gi-body (gi-repeat 4096)) 201 now [3600 3600 123] repo "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 1)
+         (= (vector-count (github-checkpoint-seal-approved (gi-body (gi-repeat 4097)) 201 now [3600 3600 123] repo "bot-one" true empty "bot-one" "host-one" "lease-one" empty empty empty)) 0))))

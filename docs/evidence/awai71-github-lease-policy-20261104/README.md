@@ -190,3 +190,34 @@ must be explicitly reconciled before any issuer composes them. In particular,
 a provider token rejected after issuance is an outstanding credential that
 requires revocation or expiry reconciliation; it must not be silently retried.
 No such reconciliation, secure host, real App or token is implemented here.
+
+## Policy-to-envelope composition candidate
+
+`github-checkpoint-seal-approved` now composes the request policy, full
+provider response checks and the existing checkpoint response/seal path. It
+requires the exact bot-state repository, authenticated policy principal and
+write permission as caller-supplied trusted inputs. It deliberately maps the
+request policy purpose `checkpoint-archive` to the fixed envelope context
+`bot-checkpoint`; it does not accept a caller-provided substitute. The policy
+budget contains seconds and the envelope uses milliseconds: the provider
+expiry must fit the requested seconds and the resulting millisecond deadline.
+The generic validator's 8192-byte lexical bound is further narrowed by the
+existing checkpoint token/envelope's 4096-byte limit. The prior low-level
+response-to-seal function is now private; this changes the experimental API.
+
+A signed local Darwin source-unity diagnostic ran the actual policy, provider
+and composition source with test-only context and encryption stubs. It checked
+an eligible response, wrong repo, principal and write authorization, expired
+budget, invalid time and the 4096/4097-byte boundary. Removing the policy guard
+made the negative-control image fail. Integration source/unity/image SHA-256:
+`540662fdc3c2c2cf0ae68f5cc66e37d0cda52f31e7be957daa8877ead7a770f4` /
+`6be937f0414dc149ca773a0c1e1cd0d3e2709b0ca2091ade05da95b2d20f8d2c` /
+`50fb385a4ad26e6e93cc179e3fdba2033cbfca7c05a347744bc86eda2cdb7ead`.
+The existing real-cryptography integration test was updated for the new API,
+but its full module/source-lock build was not run for this change.
+
+Caller-supplied policy, principal, clock, installation and recipient are not
+authenticated by these pure functions. An upstream credential that cannot be
+sealed remains outstanding; a trusted host must reconcile revocation or expiry
+before retrying. Actual signing, token issuance, live provider compatibility,
+secret handling, source-locked build and governor remain unqualified.

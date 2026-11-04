@@ -5,10 +5,11 @@
 ;; inputs, obtains issuer signature, and handles secret lifetime. This is not a
 ;; network client, credential issuer, replay ledger or qualified secret host.
 (ns kagi.github-issuance-envelope
-  (:require [kagi.github-token-response :as response] [kagi.credential-envelope :as envelope])
-  (:export [github-checkpoint-seal-response]))
+  (:require [kagi.github-token-response :as response] [kagi.credential-envelope :as envelope]
+            [kagi.github-lease-policy :as policy])
+  (:export [github-checkpoint-seal-approved]))
 
-(defn github-checkpoint-seal-response [body :vector-i64 status :i64 repo-id :i64 now-ms :i64
+(defn- github-checkpoint-seal-response [body :vector-i64 status :i64 repo-id :i64 now-ms :i64
                                       recipient :vector-i64 principal :string audience :string lease-id :string
                                       ephemeral :vector-i64 message-random :vector-i64 nonce :vector-i64] :vector-i64
   (let [expiry (response/github-checkpoint-token-expiry body status repo-id now-ms)]
@@ -18,3 +19,26 @@
           (let [token (response/github-checkpoint-token body status repo-id now-ms)]
             (if (= (vector-count token) 0) (vector-i64)
               (envelope/credential-seal recipient context token ephemeral message-random nonce))))))))
+
+;; The issuer must already have authenticated the policy, principal,
+;; recipient and provider transport. This composition narrows the generic
+;; policy to the checkpoint envelope's fixed repo, write permission and
+;; purpose. Budget is [max-ttl-seconds requested-ttl-seconds repository-id].
+;; A failed post-issuance check does not revoke the upstream credential;
+;; the host must retain unknown state and reconcile revocation/expiry.
+(defn github-checkpoint-seal-approved [body :vector-i64 status :i64 now-ms :i64 budget :vector-i64
+                                     policy-repo :string policy-principal :string allow-write :bool
+                                     recipient :vector-i64 principal :string audience :string lease-id :string
+                                     ephemeral :vector-i64 message-random :vector-i64 nonce :vector-i64] :vector-i64
+  (let [repo "cloud-itonami/itonami-bot-state"
+        admitted (= (policy/github-lease-request-problem policy-repo policy-principal allow-write
+                      repo principal "checkpoint-archive" "contents:write" budget) "lease/request-eligible")]
+    (if (or (not admitted) (< now-ms 1000) (> now-ms (- 9007199254740991 3600000))) (vector-i64)
+      (let [repo-id (vector-at budget 2) ttl (vector-at budget 1)
+            checked (policy/github-lease-provider-response-problem repo repo-id "contents:write"
+                      (quot now-ms 1000) ttl status body)
+            expiry (if (= checked "lease/provider-eligible")
+                     (response/github-checkpoint-token-expiry body status repo-id now-ms) -1)]
+        (if (or (< expiry 0) (> expiry (+ now-ms (* ttl 1000)))) (vector-i64)
+          (github-checkpoint-seal-response body status repo-id now-ms recipient principal audience lease-id
+                                           ephemeral message-random nonce))))))

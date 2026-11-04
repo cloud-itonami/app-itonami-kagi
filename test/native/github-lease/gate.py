@@ -100,6 +100,20 @@ def main():
         raise ValueError('token error guard changed')
     fixtures.update({'token-fixture': token_unity,
                      'token-error-mutant': token_unity.replace(error_guard, 'true')})
+    integration_paths = [ROOT / 'kotoba/kagi/github_issuance_envelope.kotoba',
+                         ROOT / 'test/native/github-lease/integration_cases.kotoba']
+    integration_raw = [path.read_bytes() for path in integration_paths]
+    integration_source = (body(integration_raw[0].decode('utf-8')).replace('response/', '')
+                          .replace('envelope/', '').replace('policy/', ''))
+    integration_unity = ('(ns kagi-approved-seal-test (:export [main]))\n' + source[0] + '\n' + source[1] + '\n' +
+                         body(token_raw[0].decode('utf-8')).replace('j/', '') + '\n' +
+                         integration_raw[1].decode('utf-8') + '\n' + integration_source +
+                         '\n(defn main [] :i64 (if (test-approved-sealing) 0 1))\n')
+    admitted_guard = '(not admitted)'
+    if integration_unity.count(admitted_guard) != 1:
+        raise ValueError('approved seal guard changed')
+    fixtures.update({'integration-fixture': integration_unity,
+                     'integration-policy-mutant': integration_unity.replace(admitted_guard, 'false')})
     with tempfile.TemporaryDirectory(prefix='awai71-policy-', dir='/private/tmp') as tmp:
         root = Path(tmp)
         for name, content in fixtures.items(): (root / (name + '.kotoba')).write_text(content)
@@ -153,10 +167,13 @@ def main():
             run([images['fixture']]); run([images['repo-mutant']], 1); run([images['http-mutant']], 1)
             run([images['jwt-clock-mutant']], 1); run([images['jwt-expiry-mutant']], 1)
             run([images['token-fixture']]); run([images['token-error-mutant']], 1)
+            run([images['integration-fixture']]); run([images['integration-policy-mutant']], 1)
             if any(path.read_bytes() != before for path, before in zip(paths, raw)):
                 raise ValueError('source changed during diagnostic')
             if any(path.read_bytes() != before for path, before in zip(token_paths, token_raw)):
                 raise ValueError('token source changed during diagnostic')
+            if any(path.read_bytes() != before for path, before in zip(integration_paths, integration_raw)):
+                raise ValueError('integration source changed during diagnostic')
             if sha(compiler) != a.compiler_sha256 or sha(packager) != a.packager_sha256:
                 raise ValueError('tool changed during diagnostic')
             print(json.dumps({'readerSha256': READER_PIN, 'policySha256': hashlib.sha256(raw[1]).hexdigest(),
@@ -168,6 +185,10 @@ def main():
                               'tokenSourceSha256': hashlib.sha256(token_raw[0]).hexdigest(),
                               'tokenUnitySha256': hashlib.sha256(token_unity.encode()).hexdigest(),
                               'tokenImageSha256': sha(images['token-fixture']), 'tokenErrorMutantRefused': True,
+                              'integrationSourceSha256': hashlib.sha256(integration_raw[0]).hexdigest(),
+                              'integrationUnitySha256': hashlib.sha256(integration_unity.encode()).hexdigest(),
+                              'integrationImageSha256': sha(images['integration-fixture']),
+                              'integrationPolicyMutantRefused': True,
                               'scope': 'synthetic diagnostic; no production broker, network or selfhost qualification'}))
         finally:
             if fd != 3:
