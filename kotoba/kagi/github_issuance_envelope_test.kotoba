@@ -36,5 +36,11 @@
         c (= (vector-count (i/github-checkpoint-seal-approved (gi-response "selected" "2026-11-03T00:00:00Z") 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
                                                               "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)
         d (= (vector-count (i/github-checkpoint-seal-approved (gi-response "selected" "2026-11-03T00:30:00Z") 200 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
+                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)
+        good (gi-response "selected" "2026-11-03T00:30:00Z")
+        duplicate (vector-i64-from-bytes (string-to-utf8
+                    (string-replace-all (string-from-utf8 (bytes-from-vector-i64 good))
+                                        "\"token\":\"synthetic-token\"" "\"token\":\"synthetic-token\",\"token\":\"second\"")))
+        e (= (vector-count (i/github-checkpoint-seal-approved duplicate 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
                                                               "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)]
-    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0))))
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0))))
