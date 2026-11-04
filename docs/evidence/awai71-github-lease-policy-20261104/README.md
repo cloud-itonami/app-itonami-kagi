@@ -110,3 +110,22 @@ The response is still synthetic. The trusted host must bind status and body to
 the same authenticated response, protect and erase secret material, enforce
 issuer/repository policy, seal and revoke tokens, and fail closed on unknown
 outcomes. Actual GitHub compatibility and selfhost remain unqualified.
+
+## Reproducible source-pinned diagnostic gate
+
+`test/native/github-lease/gate.py` accepts explicit SHA-256-pinned signed
+compiler and packager inputs and an explicit reader file. It requires the JCS
+reader SHA-256 `f8af2953904bd0a96e7b5c3b9e34151bcae3754e5358669adb8ac289acc0872f`,
+which matches `kotoba-lang/kotoba` commit
+`d04a7564c75faf182fa6effe46a7bb80ebc7a4a5` at
+`lib/org.ietf.jcs/kotoba/jcs/reader.kotoba`. The test-only Python assembler
+strips namespace headers, builds an explicit `main` fixture and two guard
+mutants, signs locally, executes them and rechecks source/tool bytes. A local
+Mac run passed; fixture image SHA-256 was
+`20f21d30fb14422fc4bb1107ed85b4dcf4b198be953015e9a3b99360974f43ee`.
+
+This gate is an independently pinned diagnostic, not Kagi's Kotoba native
+component assembler, a verified source-lock/import build or production CI.
+It has no network or secret inputs and does not qualify issuer, sealing,
+authentication, host or selfhost. Before integration, the native build must
+bind the reader and the actual imported module through its own reviewed lock.
