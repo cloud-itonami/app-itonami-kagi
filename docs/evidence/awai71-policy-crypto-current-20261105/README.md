@@ -85,9 +85,53 @@ receiver fixture image SHA-256 was
 `66ca4fa589fc9dcec5115ea671fcf8df5725812a41055263105991f265141f52`
 and source-lock SHA-256 was
 `854a99728d272ea18eb2fc98f95831d79ceb5ee4bb2abd88dd145a9533e4c4f`.
-Current credential module, integration test and harness SHA-256 values are
+At that run, credential module, integration test and harness SHA-256 values were
 `ed388308d4c5850c0638d1d031ae1c0bfdf3cf9322eba2e3c11fa254a2c1c456`,
 `958a9ab816be745e0504e90a6febd5d9713a73210da58473a8b97ac71a14c429`,
 and `d1b1dad76b40c998b7d11095a3a7823aa27d0a1c13d92b16f0fb5c35675fb89a`.
 These tests use synthetic token bytes and real cryptographic functions, not a
 live GitHub App, secure host, secret-delivery channel or qualified governor.
+
+## Fixed-repository Git credential response
+
+`github-checkpoint-git-credential` is a native byte-level candidate that
+accepts only `get` and the exact observed HTTPS credential request for
+`github.com/cloud-itonami/itonami-bot-state.git`, then opens the signed
+issuance and constructs `username=x-access-token` / `password` protocol
+bytes. A different host, repository, pathless request, extra field or other
+operation is refused. This exact framing is intentionally conservative and
+may reject legitimate Git variants. It is not an authenticated process or a
+secret delivery channel: the host must bind the pipe, restrict the recipient,
+enforce replay/revocation, and keep plaintext out of argv, logs and files.
+
+Git normally omits the HTTP path from helper requests unless
+`credential.useHttpPath` is enabled; see [Git credential configuration](https://git-scm.com/docs/gitcredentials).
+GitHub documents the `x-access-token` username for installation-token Git
+access in its [GitHub App installation authentication guide](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
+The existing checkpoint Git configuration guard currently rejects credential
+helpers, so a separately reviewed, scoped host integration is still required.
+
+The current source-locked Darwin native tests returned 255 for the valid
+synthetic response plus wrong-host, wrong-repository, missing-path, wrong
+operation, expired, malformed and extra-field controls. A mutant bypassing
+the exact-target check returned 113. The real local `/usr/bin/git credential
+fill`, with temporary config and `credential.useHttpPath=true`, invoked a
+signed native test helper using the diagnostic wire-41 stdin provider; it
+accepted the synthetic credential. Direct wrong-host, wrong-repository,
+missing-path and `store` controls returned no bytes. The harness captured the
+synthetic output in memory; it made no network request or real token.
+
+Git fixture image SHA-256:
+`88ff0119a0220f402e0ace724265204fd6f517d5b4b790fa46f339fd7def2582`;
+source-lock SHA-256:
+`7375f74fa33b7d470fb8c915777c2242b3da6cf5d9609bd99b3ada0741653c88`.
+Credential component, synthetic helper, Git harness and full test harness
+SHA-256 values are respectively
+`f107622ea12387076c28dd42afbfc7c743d655e7e2c2534b82089321dd76e2e0`,
+`30ee4f695a86273e02742c06fbde52386927977e660136a1f276e5104536a72b`,
+`ce3fe493620b97b583d9e968cf5a3a87d40735c86f9578fa0474b25bd137d2fc`, and
+`171395c9624b926a5c78a041feda29757ec7f055be4f38216b3fa8422b99c27e`.
+The diagnostic stdin packager SHA-256 was
+`37cc4348e95e80cc0682c8f13cfe8171f350674fff1810327d56528ae5011037`.
+This does not qualify production stdin, process lifetime, memory erasure,
+GitHub App issuance or governor, and does not deploy a helper.
