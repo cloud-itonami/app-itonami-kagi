@@ -105,6 +105,10 @@ def main():
     integration_raw = [path.read_bytes() for path in integration_paths]
     integration_source = (body(integration_raw[0].decode('utf-8')).replace('response/', '')
                           .replace('envelope/', '').replace('policy/', ''))
+    # This stubbed fixture covers the approved seal only, not Ed25519 issuance.
+    if integration_source.count(';; Experimental byte-level composition') != 1:
+        raise ValueError('signed issuance boundary changed')
+    integration_source = integration_source.split(';; Experimental byte-level composition', 1)[0]
     integration_unity = ('(ns kagi-approved-seal-test (:export [main]))\n' + source[0] + '\n' + source[1] + '\n' +
                          body(token_raw[0].decode('utf-8')).replace('j/', '') + '\n' +
                          integration_raw[1].decode('utf-8') + '\n' + integration_source +
@@ -112,8 +116,12 @@ def main():
     admitted_guard = '(not admitted)'
     if integration_unity.count(admitted_guard) != 1:
         raise ValueError('approved seal guard changed')
+    clear_call = '(gi-clear! token)'
+    if integration_unity.count(clear_call) != 1:
+        raise ValueError('temporary token clear anchor changed')
     fixtures.update({'integration-fixture': integration_unity,
-                     'integration-policy-mutant': integration_unity.replace(admitted_guard, 'false')})
+                     'integration-policy-mutant': integration_unity.replace(admitted_guard, 'false'),
+                     'integration-clear-mutant': integration_unity.replace(clear_call, 'true')})
     with tempfile.TemporaryDirectory(prefix='awai71-policy-', dir='/private/tmp') as tmp:
         root = Path(tmp)
         for name, content in fixtures.items(): (root / (name + '.kotoba')).write_text(content)
@@ -167,7 +175,7 @@ def main():
             run([images['fixture']]); run([images['repo-mutant']], 1); run([images['http-mutant']], 1)
             run([images['jwt-clock-mutant']], 1); run([images['jwt-expiry-mutant']], 1)
             run([images['token-fixture']]); run([images['token-error-mutant']], 1)
-            run([images['integration-fixture']]); run([images['integration-policy-mutant']], 1)
+            run([images['integration-fixture']]); run([images['integration-policy-mutant']], 1); run([images['integration-clear-mutant']], 1)
             if any(path.read_bytes() != before for path, before in zip(paths, raw)):
                 raise ValueError('source changed during diagnostic')
             if any(path.read_bytes() != before for path, before in zip(token_paths, token_raw)):
@@ -189,6 +197,7 @@ def main():
                               'integrationUnitySha256': hashlib.sha256(integration_unity.encode()).hexdigest(),
                               'integrationImageSha256': sha(images['integration-fixture']),
                               'integrationPolicyMutantRefused': True,
+                              'integrationClearMutantRefused': True,
                               'scope': 'synthetic diagnostic; no production broker, network or selfhost qualification'}))
         finally:
             if fd != 3:

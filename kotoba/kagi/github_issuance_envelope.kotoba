@@ -18,6 +18,12 @@
        (loop [i 0]
          (if (= i (vector-count a)) true
            (and (= (vector-at a i) (vector-at b i)) (recur (+ i 1)))))))
+;; Best-effort clearing of this temporary vector after sealing. The HTTP body,
+;; crypto temporaries, allocator copies and OS buffers remain host duties.
+(defn- gi-clear! [v :vector-i64] :bool
+  (loop [i 0]
+    (if (= i (vector-count v)) true
+      (let [ignored (vector-assoc! v i 0)] (recur (+ i 1))))))
 (defn- gi-join [a :vector-i64 b :vector-i64] :vector-i64
   (let [n (vector-count a) m (vector-count b)]
     (loop [i 0 out (vector-alloc (+ n m))]
@@ -33,7 +39,8 @@
         (if (= (vector-count context) 0) (vector-i64)
           (let [token (response/github-checkpoint-token body status repo-id now-ms)]
             (if (= (vector-count token) 0) (vector-i64)
-              (envelope/credential-seal recipient context token ephemeral message-random nonce))))))))
+              (let [box (envelope/credential-seal recipient context token ephemeral message-random nonce)
+                    cleared (gi-clear! token)] box))))))))
 
 ;; The issuer must already have authenticated the policy, principal,
 ;; recipient and provider transport. This composition narrows the generic
