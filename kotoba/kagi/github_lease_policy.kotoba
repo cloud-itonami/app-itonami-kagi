@@ -1,0 +1,58 @@
+;; Pure policy checks for a future GitHub App lease broker. The host must
+;; authenticate the requester, verify the owner's signed policy and issuer,
+;; pin the clock, and enforce the exact installation/repository binding.
+;; Passing these checks never issues, opens, persists or authorizes a token.
+(ns kagi.github-lease-policy
+  (:export [github-lease-request-problem github-lease-expiry-problem]))
+
+(defn- glp-repo? [s :string] :bool
+  (let [n (string-byte-length s)]
+    (and (>= n 3) (<= n 201) (< (string-index-of s "..") 0)
+         (loop [i 0 slash false segment 0]
+           (if (= i n) (and slash (> segment 0))
+             (let [c (string-code-point-at s i)]
+               (cond (= c 47) (if (and (not slash) (> segment 0)) (recur (+ i 1) true 0) false)
+                     (or (and (>= c 65) (<= c 90)) (and (>= c 97) (<= c 122))
+                         (and (>= c 48) (<= c 57)) (= c 45) (= c 95) (= c 46))
+                       (if (< segment 100) (recur (+ i 1) slash (+ segment 1)) false)
+                     :else false)))))))
+
+;; Fields named policy-* must come from an authenticated owner's policy;
+;; requester must be authenticated separately, not merely copied from request.
+;; Permission is an exact closed set: no extra GitHub permissions are implied.
+;; GitHub App installation/repository selection is independently verified by
+;; the issuer, including the token returned by the provider.
+(defn- github-lease-scope-problem [policy-repo :string policy-principal :string allow-write :bool
+                                 repo :string principal :string purpose :string permission :string] :string
+  (cond (or (not (glp-repo? policy-repo)) (not (glp-repo? repo))) "lease/repository-invalid"
+        (not (= policy-repo repo)) "lease/repository-refused"
+        (or (= policy-principal "") (= principal "") (> (string-byte-length principal) 256)
+            (not (= principal policy-principal))) "lease/principal-refused"
+        (not (= purpose "checkpoint-archive")) "lease/purpose-refused"
+        (not (or (= permission "contents:read") (= permission "contents:write"))) "lease/permission-refused"
+        (and (= permission "contents:write") (not allow-write)) "lease/write-refused"
+        :else "lease/scope-eligible"))
+
+(defn- github-lease-ttl-problem [max-ttl :i64 ttl :i64] :string
+  (if (or (< max-ttl 1) (> max-ttl 3600) (< ttl 1) (> ttl max-ttl))
+    "lease/ttl-refused" "lease/ttl-eligible"))
+
+;; Budget is exactly [owner-policy-max-ttl requested-ttl], both seconds.
+;; Both scope and budget must pass; neither result authorizes token issuance.
+(defn github-lease-request-problem [policy-repo :string policy-principal :string allow-write :bool
+                                   repo :string principal :string purpose :string permission :string
+                                   budget :vector-i64] :string
+  (let [scope (github-lease-scope-problem policy-repo policy-principal allow-write repo principal purpose permission)]
+    (cond (not (= scope "lease/scope-eligible")) scope
+          (not (= (vector-count budget) 2)) "lease/ttl-refused"
+          (not (= (github-lease-ttl-problem (vector-at budget 0) (vector-at budget 1)) "lease/ttl-eligible")) "lease/ttl-refused"
+          :else "lease/request-eligible")))
+
+;; Provider time is untrusted until parsed/validated. A token that cannot be
+;; proven live and within the authorized deadline is refused. Clock freshness,
+;; expiry units and token revocation remain host/provider responsibilities.
+(defn github-lease-expiry-problem [now :i64 requested-ttl :i64 expires :i64] :string
+  (cond (or (< now 1) (< requested-ttl 1) (> requested-ttl 3600)
+            (> now (- 9223372036854775807 requested-ttl))) "lease/clock-or-ttl-invalid"
+        (or (<= expires now) (> expires (+ now requested-ttl))) "lease/expiry-refused"
+        :else "lease/expiry-eligible"))

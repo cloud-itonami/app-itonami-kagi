@@ -1,0 +1,22 @@
+(ns kagi.github-lease-policy-test (:export [main]))
+(defn main [] :i64
+  (let [repo "cloud-itonami/itonami-bot-state" who "did:key:fixture" purpose "checkpoint-archive"]
+    (if (and
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [3600 3600]) "lease/request-eligible")
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60 61]) "lease/ttl-refused")
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60]) "lease/ttl-refused")
+      (= (github-lease-request-problem repo who true "cloud-itonami/other" who purpose "contents:write" [60 60]) "lease/repository-refused")
+      (= (github-lease-scope-problem repo who true repo who purpose "contents:write") "lease/scope-eligible")
+      (= (github-lease-scope-problem repo who false repo who purpose "contents:read") "lease/scope-eligible")
+      (= (github-lease-scope-problem repo who false repo who purpose "contents:write") "lease/write-refused")
+      (= (github-lease-scope-problem repo who true "cloud-itonami/other" who purpose "contents:write") "lease/repository-refused")
+      (= (github-lease-scope-problem repo who true "cloud-itonami/*" who purpose "contents:write") "lease/repository-invalid")
+      (= (github-lease-scope-problem repo who true repo "did:key:other" purpose "contents:read") "lease/principal-refused")
+      (= (github-lease-scope-problem repo who true repo who "publish" "contents:read") "lease/purpose-refused")
+      (= (github-lease-scope-problem repo who true repo who purpose "admin:write") "lease/permission-refused")
+      (= (github-lease-ttl-problem 60 61) "lease/ttl-refused")
+      (= (github-lease-ttl-problem 3601 1) "lease/ttl-refused")
+      (= (github-lease-expiry-problem 100 60 160) "lease/expiry-eligible")
+      (= (github-lease-expiry-problem 100 60 161) "lease/expiry-refused")
+      (= (github-lease-expiry-problem 100 60 100) "lease/expiry-refused")
+      (= (github-lease-expiry-problem 9223372036854775807 1 1) "lease/clock-or-ttl-invalid")) 0 1)))
