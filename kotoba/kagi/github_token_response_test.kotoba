@@ -1,0 +1,36 @@
+;; Synthetic GitHub responses only; these values are not credentials.
+(ns kagi.github-token-response-test
+  (:require [kagi.github-token-response :as t])
+  (:export [group-a group-b]))
+(defn- gt-b [s :string] :vector-i64 (vector-i64-from-bytes (string-to-utf8 s)))
+(defn- gt-repo [] :string "{\"id\":123,\"full_name\":\"cloud-itonami/itonami-bot-state\",\"private\":true}")
+(defn- gt-perms [] :string "{\"contents\":\"write\",\"metadata\":\"read\"}")
+(defn- gt-response [selection :string perms :string repos :string token :string expiry :string] :vector-i64
+  (gt-b (str " {\"token\":\"" token "\",\"expires_at\":\"" expiry "\",\"permissions\":" perms
+             ",\"repository_selection\":\"" selection "\",\"repositories\":" repos "} ")))
+(defn group-a [] :i64
+  (let [now 1793664000000 repo (gt-repo) one (str "[" repo "]") perms (gt-perms)
+        ok (gt-response "selected" perms one "synthetic-token.longer_format" "2026-11-03T00:30:00Z")
+        a (and (= (t/github-checkpoint-token-expiry ok 201 123 now) 1793665800000)
+               (= (vector-count (t/github-checkpoint-token ok 201 123 now)) 29))
+        b (= (vector-count (t/github-checkpoint-token (gt-response "all" perms one "x" "2026-11-03T00:30:00Z") 201 123 now)) 0)
+        c (= (vector-count (t/github-checkpoint-token (gt-response "selected" "{\"contents\":\"write\",\"metadata\":\"read\",\"issues\":\"write\"}" one "x" "2026-11-03T00:30:00Z") 201 123 now)) 0)
+        d (= (vector-count (t/github-checkpoint-token (gt-response "selected" perms (str "[" repo "," repo "]") "x" "2026-11-03T00:30:00Z") 201 123 now)) 0)
+        e (= (vector-count (t/github-checkpoint-token ok 201 124 now)) 0)
+        f (= (vector-count (t/github-checkpoint-token (gt-response "selected" perms "[{\"id\":123,\"full_name\":\"cloud-itonami/itonami-bot-state\",\"private\":false}]" "x" "2026-11-03T00:30:00Z") 201 123 now)) 0)
+        g (= (vector-count (t/github-checkpoint-token (gt-response "selected" perms one "" "2026-11-03T00:30:00Z") 201 123 now)) 0)
+        h (= (vector-count (t/github-checkpoint-token ok 200 123 now)) 0)]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if g 64 0) (if h 128 0))))
+(defn group-b [] :i64
+  (let [now 1793664000000 one (str "[" (gt-repo) "]") perms (gt-perms)
+        a (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-11-03T00:00:00Z") 201 123 now) -1)
+        b (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-11-03T01:00:01Z") 201 123 now) -1)
+        c (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-02-29T00:00:00Z") 201 123 now) -1)
+        d (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-11-03T00:30:00+00:00") 201 123 now) -1)
+        duplicate (gt-b "{\"token\":\"x\",\"token\":\"y\"}")
+        e (= (t/github-checkpoint-token-expiry duplicate 201 123 now) -1)
+        f (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x\\n" "2026-11-03T00:30:00Z") 201 123 now) -1)
+        g (and (= (t/github-checkpoint-token-expiry (gt-response "selected" perms one "x" "2026-11-03T01:00:00Z") 201 123 now) (+ now 3600000))
+               (= (vector-count (t/github-checkpoint-token
+                  (gt-response "selected" perms one "synthetic-token-with-variable-length-0123456789-0123456789-0123456789" "2026-11-03T00:30:00Z") 201 123 now)) 69))]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if g 64 0))))
