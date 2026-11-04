@@ -1,0 +1,93 @@
+;; Native source assembler for the GitHub lease *diagnostic gate* only.
+;; Build with the trusted, pinned sha2.core owner source; the host must verify
+;; that compiler/assembler and caller-provided source digests are authentic.
+;; All paths must be host-owned under an exclusive FD3 scope. This does not
+;; build a broker, seal tokens, qualify a source lock or authorize deployment.
+(ns kagi.github-lease-assemble
+  (:export [main])
+  (:require [sha2.core :refer [sha256-hex]]))
+
+(defn- gla-arg [n :i64] :string (typed-cap-call 38 :string :string (string-from-i64 n)))
+(defn- gla-fs [op :string path :string tail :string] :string
+  (let [r (typed-cap-call 35 :string :string (str "\u0000FS2\u0000" op path "\u0000" tail))]
+    (if (and (>= (string-byte-length r) 5) (= (string-substring r 0 5) "\u0000FS2\u0000"))
+      (string-substring r 5 (string-length r)) "")))
+(defn- gla-field [s :string n :i64] :string
+  (loop [i 0 start 0 field 0]
+    (cond (= i (string-length s)) (if (= field n) (string-substring s start i) "")
+          (= (string-substring s i (+ i 1)) " ")
+            (if (= field n) (string-substring s start i) (recur (+ i 1) (+ i 1) (+ field 1)))
+          :else (recur (+ i 1) start field))))
+(defn- gla-num [s :string limit :i64] :i64
+  (if (or (= (string-length s) 0) (> (string-length s) limit)) -1
+    (loop [i 0 n 0]
+      (if (= i (string-length s)) n
+        (let [c (string-code-point-at s i)]
+          (if (and (>= c 48) (<= c 57)) (recur (+ i 1) (+ (* n 10) (- c 48))) -1))))))
+(defn- gla-size [path :string] :i64
+  (let [m (gla-fs "O" path "") mode (gla-field m 0) size (gla-field m 1)
+        blocks (gla-field m 2) kind (gla-field m 3) p (gla-num mode 3) n (gla-num size 6) b (gla-num blocks 16)]
+    (if (and (= m (str mode " " size " " blocks " " kind)) (>= p 0) (<= p 511)
+             (>= b 0) (= kind "0") (> n 0) (<= n 131072)) n -1)))
+(defn- gla-read [path :string] :string
+  (let [n (gla-size path)]
+    (if (< n 1) ""
+      (let [b (typed-cap-call 35 :string :bytes (str "\u0000FS2\u0000E" path "\u00000:" n))]
+        (if (and (= (bytes-count b) (+ n 5)) (= (bytes-at b 0) 0) (= (bytes-at b 1) 70)
+                 (= (bytes-at b 2) 83) (= (bytes-at b 3) 50) (= (bytes-at b 4) 0) (= (gla-size path) n))
+          (string-from-utf8 (bytes-slice b 5 (+ n 5))) "")))))
+(defn- gla-hex? [s :string] :bool
+  (and (= (string-byte-length s) 64)
+    (loop [i 0] (if (= i 64) true
+      (let [c (string-code-point-at s i)]
+        (if (or (and (>= c 48) (<= c 57)) (and (>= c 97) (<= c 102))) (recur (+ i 1)) false))))))
+(defn- gla-path? [s :string] :bool
+  (and (> (string-byte-length s) 1) (<= (string-byte-length s) 240)
+       (= (string-substring s 0 1) "/") (< (string-index-of s "..") 0)
+       (< (string-index-of s "//") 0) (< (string-index-of s "/./") 0)
+       (< (string-index-of s "_SEP") 0) (not (= (string-substring s (- (string-length s) 1) (string-length s)) "/"))
+       (not (= (string-substring s (- (string-length s) 2) (string-length s)) "/."))
+       (loop [i 0] (if (= i (string-length s)) true
+         (let [c (string-code-point-at s i)]
+           (if (and (>= c 33) (<= c 126)) (recur (+ i 1)) false))))))
+(defn- gla-body [s :string] :string
+  (let [start (string-index-of s "(ns ")]
+    (if (< start 0) ""
+      (loop [i start depth 0]
+        (if (= i (string-length s)) ""
+          (let [c (string-code-point-at s i) next (+ depth (if (= c 40) 1 (if (= c 41) -1 0)))]
+            (if (and (= c 41) (= next 0)) (string-substring s (+ i 1) (string-length s))
+              (recur (+ i 1) next))))))))
+(defn- gla-hash [s :string] :string (sha256-hex (vector-i64-from-bytes (string-to-utf8 s))))
+(defn- gla-write [path :string source :string] :bool
+  ;; FS2 B/C responses are bytes, not strings. Bound each write and verify
+  ;; the synchronized file by reading it back under the exclusive scope.
+  (if (not (= (string-length source) (string-byte-length source))) false
+    (let [n (string-length source)
+          done (loop [i 0 first true]
+                 (if (= i n) true
+                   (let [end (if (< (+ i 4096) n) (+ i 4096) n)
+                         frame (str "\u0000FS2\u0000" (if first "B" "C") path "\u0000" (string-substring source i end))
+                         ignored (typed-cap-call 35 :bytes :bytes (string-to-utf8 frame))]
+                     (recur end false))))]
+      (and done (= (gla-fs "M" path "") "1") (= (gla-hash (gla-read path)) (gla-hash source))))))
+(defn main [] :i64
+  (let [reader (gla-arg 0) policy (gla-arg 1) cases (gla-arg 2) provider (gla-arg 3) out (gla-arg 4)
+        ph (gla-arg 5) ch (gla-arg 6) vh (gla-arg 7)]
+    (if (or (not (= (gla-arg 8) "")) (not (gla-path? reader)) (not (gla-path? policy))
+            (not (gla-path? cases)) (not (gla-path? provider)) (not (gla-path? out))
+            (= out reader) (= out policy) (= out cases) (= out provider)
+            (not (gla-hex? ph)) (not (gla-hex? ch)) (not (gla-hex? vh))) 2
+      (let [r (gla-read reader) p (gla-read policy) c (gla-read cases) v (gla-read provider)]
+        (if (or (not (= (gla-hash r) "f8af2953904bd0a96e7b5c3b9e34151bcae3754e5358669adb8ac289acc0872f"))
+                (not (= (gla-hash p) ph)) (not (= (gla-hash c) ch)) (not (= (gla-hash v) vh))) 2
+          (let [rb (gla-body r) pb (gla-body p) cb (gla-body c) vb (gla-body v)
+                old "(defn main [] :i64" at (string-index-of cb old)]
+            (if (or (= rb "") (= pb "") (= cb "") (= vb "") (< at 0)
+                    (not (= (gla-fs "D" out "") "0"))) 2
+              (let [test (str (string-substring cb 0 at) "(defn glpt-policy-main [] :i64"
+                              (string-substring cb (+ at (string-length old)) (string-length cb)))
+                    source (str "(ns kagi-github-lease-native-test (:export [main]))\n" rb "\n" pb "\n" test "\n" vb
+                                "\n(defn main [] :i64 (if (and (= (glpt-policy-main) 0) (test-github-provider)) 0 1))\n")
+                    wrote (gla-write out source)]
+                (if wrote 0 2)))))))))

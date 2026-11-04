@@ -124,7 +124,16 @@ mutants, signs locally, executes them and rechecks source/tool bytes. A local
 Mac run passed; fixture image SHA-256 was
 `20f21d30fb14422fc4bb1107ed85b4dcf4b198be953015e9a3b99360974f43ee`.
 
-This gate is an independently pinned diagnostic, not Kagi's Kotoba native
+With `--sha2 /path/to/sha2/core.kotoba`, the gate also builds and executes
+`kotoba/kagi/github_lease_assemble.kotoba` using the SHA-256-pinned owner
+source `2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888`.
+The native assembler's output matched the Python fixture byte for byte; it
+refused an incorrect policy digest and an existing output. The diagnostic host
+must supply trusted source digests and an exclusive, host-owned FD3 directory;
+it must prevent path aliases and concurrent input modifications. The Python
+harness still bootstraps the diagnostic and independently checks its output.
+
+This gate is an independently pinned diagnostic, not Kagi's production native
 component assembler, a verified source-lock/import build or production CI.
 It has no network or secret inputs and does not qualify issuer, sealing,
 authentication, host or selfhost. Before integration, the native build must

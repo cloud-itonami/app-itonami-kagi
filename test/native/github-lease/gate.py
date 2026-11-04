@@ -13,6 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 READER_PIN = 'f8af2953904bd0a96e7b5c3b9e34151bcae3754e5358669adb8ac289acc0872f'
+SHA2_PIN = '2c59ef55bc2b527c1aac723c0fee896eba75ee82fecd212a2858782beadc6888'
 
 
 def sha(path):
@@ -59,6 +60,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('reader', 'compiler', 'packager'):
         p.add_argument('--' + name, required=True, type=Path)
+    p.add_argument('--sha2', type=Path, help='also test the native source assembler against this pinned owner source')
     p.add_argument('--compiler-sha256', required=True)
     p.add_argument('--packager-sha256', required=True)
     a = p.parse_args()
@@ -86,6 +88,13 @@ def main():
     with tempfile.TemporaryDirectory(prefix='awai71-policy-', dir='/private/tmp') as tmp:
         root = Path(tmp)
         for name, content in fixtures.items(): (root / (name + '.kotoba')).write_text(content)
+        if a.sha2:
+            sha2 = verified(a.sha2, SHA2_PIN)
+            assembler = ROOT / 'kotoba/kagi/github_lease_assemble.kotoba'
+            native_source = ('(ns kagi-gate-assembler (:export [main]))\n' +
+                             body(sha2.read_text()) + '\n' + body(assembler.read_text()))
+            (root / 'assembler.kotoba').write_text(native_source)
+            for i, item in enumerate(raw): (root / ('source-' + str(i))).write_bytes(item)
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY)
         saved = None
         if fd != 3:
@@ -112,6 +121,19 @@ def main():
                 subprocess.run(['/usr/bin/codesign', '--force', '--sign', '-', str(image)], check=True, capture_output=True, timeout=30)
                 subprocess.run(['/usr/bin/codesign', '--verify', '--strict', str(image)], check=True, capture_output=True, timeout=30)
                 return image
+            native_assembler = False
+            if a.sha2:
+                image = build('assembler')
+                args = [image] + ['/source-' + str(i) for i in range(4)] + ['/assembled.kotoba'] + [hashlib.sha256(x).hexdigest() for x in raw[1:]]
+                run(args)
+                if (root / 'assembled.kotoba').read_text() != unity:
+                    raise ValueError('native assembler output mismatch')
+                run(args, 2)  # Existing output must not be overwritten.
+                bad = args.copy(); bad[5] = '/bad.kotoba'; bad[6] = '0' * 64
+                run(bad, 2)
+                if (root / 'bad.kotoba').exists():
+                    raise ValueError('native assembler accepted wrong source hash')
+                native_assembler = True
             images = {name: build(name) for name in fixtures}
             run([images['fixture']]); run([images['repo-mutant']], 1); run([images['http-mutant']], 1)
             if any(path.read_bytes() != before for path, before in zip(paths, raw)):
@@ -121,6 +143,7 @@ def main():
             print(json.dumps({'readerSha256': READER_PIN, 'policySha256': hashlib.sha256(raw[1]).hexdigest(),
                               'unitySha256': hashlib.sha256(unity.encode()).hexdigest(),
                               'imageSha256': sha(images['fixture']), 'positive': True,
+                              'nativeAssembler': native_assembler,
                               'repositoryMutantRefused': True, 'httpMutantRefused': True,
                               'scope': 'synthetic diagnostic; no production broker, network or selfhost qualification'}))
         finally:
