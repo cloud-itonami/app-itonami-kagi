@@ -88,6 +88,18 @@ def main():
                 'http-mutant': unity.replace(http_guard, 'false'),
                 'jwt-clock-mutant': unity.replace(jwt_time_guard, 'false'),
                 'jwt-expiry-mutant': unity.replace(jwt_expiry, '(+ now 301)')}
+    token_paths = [ROOT / 'kotoba/kagi/github_token_response.kotoba',
+                   ROOT / 'kotoba/kagi/github_token_response_test.kotoba']
+    token_raw = [path.read_bytes() for path in token_paths]
+    token_unity = ('(ns kagi-token-response-native-test (:export [main]))\n' + source[0] + '\n' +
+                   body(token_raw[0].decode('utf-8')).replace('j/', '') + '\n' +
+                   body(token_raw[1].decode('utf-8')).replace('t/', '') +
+                   '\n(defn main [] :i64 (if (and (= (group-a) 255) (= (group-b) 127) (= (group-c) 7)) 0 1))\n')
+    error_guard = '(< (json-member b root "error") 0)'
+    if token_unity.count(error_guard) != 1:
+        raise ValueError('token error guard changed')
+    fixtures.update({'token-fixture': token_unity,
+                     'token-error-mutant': token_unity.replace(error_guard, 'true')})
     with tempfile.TemporaryDirectory(prefix='awai71-policy-', dir='/private/tmp') as tmp:
         root = Path(tmp)
         for name, content in fixtures.items(): (root / (name + '.kotoba')).write_text(content)
@@ -140,8 +152,11 @@ def main():
             images = {name: build(name) for name in fixtures}
             run([images['fixture']]); run([images['repo-mutant']], 1); run([images['http-mutant']], 1)
             run([images['jwt-clock-mutant']], 1); run([images['jwt-expiry-mutant']], 1)
+            run([images['token-fixture']]); run([images['token-error-mutant']], 1)
             if any(path.read_bytes() != before for path, before in zip(paths, raw)):
                 raise ValueError('source changed during diagnostic')
+            if any(path.read_bytes() != before for path, before in zip(token_paths, token_raw)):
+                raise ValueError('token source changed during diagnostic')
             if sha(compiler) != a.compiler_sha256 or sha(packager) != a.packager_sha256:
                 raise ValueError('tool changed during diagnostic')
             print(json.dumps({'readerSha256': READER_PIN, 'policySha256': hashlib.sha256(raw[1]).hexdigest(),
@@ -150,6 +165,9 @@ def main():
                               'nativeAssembler': native_assembler,
                               'repositoryMutantRefused': True, 'httpMutantRefused': True,
                               'jwtClockMutantRefused': True, 'jwtExpiryMutantRefused': True,
+                              'tokenSourceSha256': hashlib.sha256(token_raw[0]).hexdigest(),
+                              'tokenUnitySha256': hashlib.sha256(token_unity.encode()).hexdigest(),
+                              'tokenImageSha256': sha(images['token-fixture']), 'tokenErrorMutantRefused': True,
                               'scope': 'synthetic diagnostic; no production broker, network or selfhost qualification'}))
         finally:
             if fd != 3:

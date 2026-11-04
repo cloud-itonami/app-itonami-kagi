@@ -161,3 +161,32 @@ This is only an unsigned input, not a JWT or an authorization. Trusted clock,
 issuer binding, RS256 private-key custody and signing, GitHub transport, token
 issuance, sealing, revocation, host integration and selfhost qualification
 remain open. No secret, real App or GitHub issuance was used in this test.
+
+## Main envelope integration and contradictory provider responses
+
+The draft incorporates Kagi main `7d9467d` as a merge parent, bringing in the
+experimental checkpoint response and encrypted-envelope components from #60.
+That is branch integration, not evidence of a host or broker deployment.
+The merged checkpoint token parser previously allowed an HTTP 201 response
+with both a valid-looking token and a top-level `error` member. It now refuses
+such a response before returning a token or expiry, consistent with this
+draft's separate provider-policy validator.
+
+A local signed Darwin native source-unity diagnostic composed the selected
+current JCS reader, checkpoint token parser and its synthetic response cases.
+The original groups passed, a normal response still passed, and a response
+containing `error: null` was refused. A separate image with only this guard
+removed failed. Source/unity/image SHA-256:
+`ab55b7e7e2f89797c0a869d371167366163185133c3d4103e9ec12f47aed8e4f` /
+`24388684e9f2d15cf69c20fa8efdf4a22e6a8d77d087f1d21a11aea1cf648307` /
+`cd93056e99cd793d154e9ec69581a0888449f9bef8bf3d1fa324528cdab13a8b`.
+The diagnostic does not run the integrated encryption or an actual provider.
+
+These are still distinct interfaces: the request policy uses
+`checkpoint-archive`, accepts read or write requests and bounds opaque token
+text at 8192 bytes; the checkpoint envelope fixes `bot-checkpoint`, write
+access and a 4096-byte plaintext bound. Their meanings and seconds/milliseconds
+must be explicitly reconciled before any issuer composes them. In particular,
+a provider token rejected after issuance is an outstanding credential that
+requires revocation or expiry reconciliation; it must not be silently retried.
+No such reconciliation, secure host, real App or token is implemented here.

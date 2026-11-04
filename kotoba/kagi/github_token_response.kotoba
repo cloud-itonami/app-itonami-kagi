@@ -53,7 +53,8 @@
                first (j/json-element b repos 0) id (j/json-member b first "id")
                private (j/json-member b first "private") token (j/json-member b root "token")
                expiry (gt-expiry (gt-str b root "expires_at"))]
-           (and (= (gt-str b root "repository_selection") "selected")
+           (and (< (j/json-member b root "error") 0)
+                (= (gt-str b root "repository_selection") "selected")
                 (= (j/json-kind b perms) 1) (= (j/json-count b perms) 2)
                 (= (gt-str b perms "contents") "write") (= (gt-str b perms "metadata") "read")
                 (= (j/json-kind b repos) 2) (= (j/json-count b repos) 1)
