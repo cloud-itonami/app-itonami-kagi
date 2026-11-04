@@ -20,3 +20,17 @@ signed test image SHA-256:
 `45042d450bb79b64ceede4000293feaf86c59923e4ad9d7ecf79a554d52f39ab`.
 The local script records specific temporary dependency paths and is a diagnostic,
 not a portable production build or selfhost qualification.
+
+## Cryptographic composition regression
+
+After the raw-validation change, `integration.py` reran the valid selected-source
+fixture with its pinned JCS and cryptographic dependencies. The native image
+returned the expected bitmask 255 for synthetic sealing, signing, opening and
+refusal controls. Its signed image SHA-256 was
+`45e65b2830f780df34ff3568beb9c20637addd4cf7dea5691a96059aede2c8c2`, and
+its source lock SHA-256 was
+`33c217f10364eef2bc23494997c32c5df818415464c39dd5cfade3df8d0e2edd`.
+The script derives from the archived `awai71-policy-crypto-current-20261105`
+operator with only the valid case enabled; it uses absolute local paths and
+3-second per-process CPU limits, without a hard memory cap. This does not test
+real credentials, HTTP transport, host isolation or governor qualification.
