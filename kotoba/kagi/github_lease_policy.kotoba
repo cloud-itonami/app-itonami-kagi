@@ -135,19 +135,19 @@
 (defn- glp-token-raw? [b :vector-i64 p :i64] :bool
   (if (or (< p 0) (not (= (json-kind b p) 3))) false
     (let [end (json-end b p) n (- end p 2)]
-      (and (>= n 1) (<= n 512)
+      (and (>= n 1) (<= n 8192)
         (loop [i (+ p 1)]
           (if (= i (- end 1)) true
             (let [c (vector-at b i)]
-              (if (or (and (>= c 48) (<= c 57)) (and (>= c 65) (<= c 90))
-                      (and (>= c 97) (<= c 122)) (= c 95) (= c 45))
+              (if (and (>= c 33) (<= c 126) (not (= c 34)) (not (= c 92)))
                 (recur (+ i 1)) false))))))))
 
 ;; A bounded complete response is validated as one document. No token bytes
 ;; are decoded, returned or logged here. The host must protect and later seal
 ;; the original response, and verify TLS, installation, identity and request.
 (defn github-lease-provider-response-problem [expected-repo :string expected-id :i64 permission :string
-                                             now :i64 ttl :i64 body :vector-i64] :string
+                                             now :i64 ttl :i64 http-status :i64 body :vector-i64] :string
+  (if (not (= http-status 201)) "lease/provider-http-refused"
   (if (or (= (vector-count body) 0) (> (vector-count body) 262144)
           (not (= (vector-at body 0) 123)) (not (json-valid? body)) (not (= (json-kind body 0) 1)))
     "lease/provider-json-refused"
@@ -164,7 +164,8 @@
           contents (if (>= perms 0) (glp-json-string body perms "contents") "")
           metadata (if (>= perms 0) (glp-json-string body perms "metadata") "")
           expires (glp-utc-seconds (glp-json-string body 0 "expires_at"))]
-      (cond (not token-ok) "lease/provider-token-refused"
+      (cond (>= (json-member body 0 "error") 0) "lease/provider-error-refused"
+            (not token-ok) "lease/provider-token-refused"
             (not (= (json-kind body private) 5)) "lease/provider-private-refused"
             :else (github-lease-provider-problem expected-repo repo-name selection permission contents metadata
-                    [expected-id repo-id repo-count perm-count now ttl expires])))))
+                    [expected-id repo-id repo-count perm-count now ttl expires]))))))

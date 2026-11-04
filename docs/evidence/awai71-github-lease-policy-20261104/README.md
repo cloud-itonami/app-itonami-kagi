@@ -83,3 +83,30 @@ signed fixture SHA-256:
 These are synthetic fixtures, not a live GitHub response, authenticated TLS,
 provider response compatibility, authorization, token sealing, revocation,
 qualified host or selfhost build.
+
+## Current token format and HTTP outcome
+
+The initial 512-byte, alphanumeric-only lexical envelope would reject GitHub's
+current stateless installation tokens, which may contain dot separators and
+are about 520 bytes. GitHub asks integrators to treat these tokens as opaque:
+<https://github.blog/changelog/2026-10-02-stateless-github-app-installation-tokens-rolled-out/>.
+The candidate now accepts 1–8192 unescaped visible ASCII bytes except quote
+and backslash, without interpreting a prefix or JWT claims. This remains a
+conservative transport envelope, not proof that all future provider formats
+will fit. Control characters, JSON escapes and excessive length refuse.
+
+The response validator also requires the trusted transport's HTTP status to be
+201 and refuses any top-level `error` member. GitHub documents 201 as the
+creation response: <https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app>.
+A signed native Mac synthetic fixture accepted a dot-separated token exceeding
+520 bytes and refused a token over 8192 bytes, a non-201 response, and a
+contradictory error member. Separate mutants bypassing repository match or
+HTTP status caused the fixture to fail. Fixture source SHA-256 was
+`114c3f3e708ffc0f4e2257698bbf994ca0cb42be24bda97e9d27f533ec8191b0`;
+signed positive image SHA-256 was
+`20f21d30fb14422fc4bb1107ed85b4dcf4b198be953015e9a3b99360974f43ee`.
+
+The response is still synthetic. The trusted host must bind status and body to
+the same authenticated response, protect and erase secret material, enforce
+issuer/repository policy, seal and revoke tokens, and fail closed on unknown
+outcomes. Actual GitHub compatibility and selfhost remain unqualified.
