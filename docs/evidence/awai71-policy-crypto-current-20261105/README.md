@@ -111,7 +111,7 @@ access in its [GitHub App installation authentication guide](https://docs.github
 The existing checkpoint Git configuration guard currently rejects credential
 helpers, so a separately reviewed, scoped host integration is still required.
 
-The current source-locked Darwin native tests returned 255 for the valid
+The source-locked Darwin native tests for that revision returned 255 for the valid
 synthetic response plus wrong-host, wrong-repository, missing-path, wrong
 operation, expired, malformed and extra-field controls. A mutant bypassing
 the exact-target check returned 113. The real local `/usr/bin/git credential
@@ -135,3 +135,35 @@ The diagnostic stdin packager SHA-256 was
 `37cc4348e95e80cc0682c8f13cfe8171f350674fff1810327d56528ae5011037`.
 This does not qualify production stdin, process lifetime, memory erasure,
 GitHub App issuance or governor, and does not deploy a helper.
+
+## Reducing explicit plaintext copies
+
+The Git credential formatter now allocates one output vector, copies the
+opened token into it, and overwrites that token vector on success or refusal.
+The caller can invoke `github-checkpoint-clear-credential!` after the response
+has been consumed to overwrite the returned vector. This is best-effort
+clearing of those particular vectors, **not** proof of secure erasure: crypto
+temporaries, allocator copies, runtime conversions, the helper pipe, Git,
+swap and OS buffers may still contain plaintext. The test helper clears the
+returned vector after its synthetic write, but its string conversion is also
+only diagnostic and is not a production secret channel.
+
+The selected actual formatter and clear functions passed a signed Darwin
+native fixture checking the returned bytes, aliased token zeroing, invalid-token
+zeroing and returned-buffer zeroing. Removing the token clear calls caused
+the fixture to fail. Fixture source SHA-256:
+`0d24cd98b49344ae1c082c6c8e7710aaed8075fa379f121551ff621f9404167c`.
+The full source-locked crypto tests also passed (including clear bitmask 7),
+and actual local Git `credential fill` again invoked the synthetic native
+helper; wrong target and store remained refused. Updated Git fixture image and
+source-lock SHA-256 were
+`070af1ce586535068eb927a6755d2cbf4d16b1089724755114682145eafbe739` and
+`73d1013c3db16be3a6cf1c6084dcc712f73d75c88f4b53228bfff01b5761aac8`.
+Current credential component SHA-256:
+`0ea140535b40e845c8f9c4f510220d2331defa7db0ac88b17b129f45297b6e51`;
+clear diagnostic SHA-256:
+`341897960003bb7157f1b4cb333d9f3a83f926f1027b48aff7dd8f33c7f25a74`;
+full test harness SHA-256:
+`f434fc5b5f1f141164e89b7bf6220a8fa798e975fe2e86b64d006fbdfa5e6cef`.
+These synthetic tests do not qualify host isolation, secret erasure, real
+credential issuance, GitHub access or the governor.

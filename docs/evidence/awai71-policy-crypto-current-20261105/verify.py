@@ -28,7 +28,7 @@ def build(label,group,mutate):
    _,pin,path=line.split(' ');name=path.removeprefix('/valid/src/')
    if name in files and not name.startswith(('kagi/','pq/')):
     assert hashlib.sha256(files[name]).hexdigest()==pin, name
- entry='git-main' if group=='git' else ('issued-main' if group=='issued' else 'main')
+ entry='clear-main' if group=='clear' else ('git-main' if group=='git' else ('issued-main' if group=='issued' else 'main'))
  files['pq/entry.kotoba']=('(ns pq.entry (:require [kagi.github-issuance-envelope-test :as g]) (:export [main]))\n(defn main [] :i64 (g/'+entry+'))\n').encode()
  for n,b in files.items():
   path=root/n;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b)
@@ -36,6 +36,6 @@ def build(label,group,mutate):
  flags=['--source-path',rel,'--source-lock',lock.name,'--source-lock-sha256',hashlib.sha256(lock.read_bytes()).hexdigest()];entry=rel+'/pq/entry.kotoba'
  call(label+'-check',[compiler,'check',entry,*flags]);call(label+'-compile',[compiler,'compile',entry,'--target','aarch64-macos','--output',label+'.kseed',*flags]);out=call(label+'-extract',[compiler,'extract-native',label+'.kseed','--symbol','main','--output',label+'.raw']);m=re.search(rb':offset (\d+), :length (\d+), :arity 0\}',out);assert m
  call(label+'-pack',[pack,label+'-unsigned.macho',label+'.raw','fs2-cli-stdio-general',m.group(1).decode()]);binary=base/(label+'.macho');shutil.copyfile(base/(label+'-unsigned.macho'),binary);os.chmod(binary,0o700);subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(binary)],check=True,capture_output=True)
- r=subprocess.run([str(binary)],cwd=base,pass_fds=(fd,),capture_output=True,env={'PATH':'/nonexistent'},timeout=12,preexec_fn=lim);print(label+'-result',r.returncode,flush=True);expected=(113 if mutate=='git-target' else 255) if group=='git' else ((61 if mutate=='open-clock' else 63) if group=='issued' else (253 if mutate=='both' else (191 if mutate=='issuer-mismatch' else 255)));assert r.returncode==expected,(r.returncode,r.stderr)
+ r=subprocess.run([str(binary)],cwd=base,pass_fds=(fd,),capture_output=True,env={'PATH':'/nonexistent'},timeout=12,preexec_fn=lim);print(label+'-result',r.returncode,flush=True);expected=7 if group=='clear' else ((113 if mutate=='git-target' else 255) if group=='git' else ((61 if mutate=='open-clock' else 63) if group=='issued' else (253 if mutate=='both' else (191 if mutate=='issuer-mismatch' else 255))));assert r.returncode==expected,(r.returncode,r.stderr)
  print(label+'-sha256',hashlib.sha256(binary.read_bytes()).hexdigest(),'lock-sha256',hashlib.sha256(lock.read_bytes()).hexdigest(),flush=True)
-build('valid','a','none');build('token-guard-mutant','a','token-only');build('both-guards-mutant','a','both');build('issuer-mutant','a','issuer-mismatch');build('issued','issued','none');build('issued-clock-mutant','issued','open-clock');build('git','git','none');build('git-target-mutant','git','git-target');os.close(fd);shutil.rmtree(base)
+build('valid','a','none');build('token-guard-mutant','a','token-only');build('both-guards-mutant','a','both');build('issuer-mutant','a','issuer-mismatch');build('issued','issued','none');build('issued-clock-mutant','issued','open-clock');build('git','git','none');build('git-target-mutant','git','git-target');build('clear','clear','none');os.close(fd);shutil.rmtree(base)
