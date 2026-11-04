@@ -2,6 +2,10 @@
 (defn main [] :i64
   (let [repo "cloud-itonami/itonami-bot-state" who "did:key:fixture" purpose "checkpoint-archive"]
     (if (and
+      (= (github-app-jwt-signing-input 12345 1767225600) "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJleHAiOjE3NjcyMjU5MDAsImlhdCI6MTc2NzIyNTU0MCwiaXNzIjoiMTIzNDUifQ")
+      (= (github-app-jwt-signing-input 0 1767225600) "")
+      (= (github-app-jwt-signing-input 12345 0) "")
+      (= (github-app-jwt-signing-input 12345 9007199254740991) "")
       (= (github-lease-request-body repo who true repo who purpose "contents:write" [3600 3600 1443502872]) "{\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"},\"repository_ids\":[1443502872]}")
       (= (github-lease-request-body repo who true "cloud-itonami/other" who purpose "contents:write" [60 60 1443502872]) "")
       (= (github-lease-request-body repo who true repo who purpose "contents:read" [60 60 0]) "")

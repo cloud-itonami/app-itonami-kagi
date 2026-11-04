@@ -81,10 +81,13 @@ def main():
     unity = ('(ns kagi-github-lease-native-test (:export [main]))\n' + '\n'.join(source) +
              '\n(defn main [] :i64 (if (and (= (glpt-policy-main) 0) (test-github-provider)) 0 1))\n')
     repo_guard, http_guard = '(not (= policy-repo repo))', '(not (= http-status 201))'
-    if unity.count(repo_guard) != 1 or unity.count(http_guard) != 1:
+    jwt_time_guard, jwt_expiry = '(< now 61)', '(+ now 300)'
+    if any(unity.count(x) != 1 for x in (repo_guard, http_guard, jwt_time_guard, jwt_expiry)):
         raise ValueError('negative-control anchor changed')
     fixtures = {'fixture': unity, 'repo-mutant': unity.replace(repo_guard, 'false'),
-                'http-mutant': unity.replace(http_guard, 'false')}
+                'http-mutant': unity.replace(http_guard, 'false'),
+                'jwt-clock-mutant': unity.replace(jwt_time_guard, 'false'),
+                'jwt-expiry-mutant': unity.replace(jwt_expiry, '(+ now 301)')}
     with tempfile.TemporaryDirectory(prefix='awai71-policy-', dir='/private/tmp') as tmp:
         root = Path(tmp)
         for name, content in fixtures.items(): (root / (name + '.kotoba')).write_text(content)
@@ -136,6 +139,7 @@ def main():
                 native_assembler = True
             images = {name: build(name) for name in fixtures}
             run([images['fixture']]); run([images['repo-mutant']], 1); run([images['http-mutant']], 1)
+            run([images['jwt-clock-mutant']], 1); run([images['jwt-expiry-mutant']], 1)
             if any(path.read_bytes() != before for path, before in zip(paths, raw)):
                 raise ValueError('source changed during diagnostic')
             if sha(compiler) != a.compiler_sha256 or sha(packager) != a.packager_sha256:
@@ -145,6 +149,7 @@ def main():
                               'imageSha256': sha(images['fixture']), 'positive': True,
                               'nativeAssembler': native_assembler,
                               'repositoryMutantRefused': True, 'httpMutantRefused': True,
+                              'jwtClockMutantRefused': True, 'jwtExpiryMutantRefused': True,
                               'scope': 'synthetic diagnostic; no production broker, network or selfhost qualification'}))
         finally:
             if fd != 3:

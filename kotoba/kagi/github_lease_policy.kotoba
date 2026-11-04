@@ -3,8 +3,33 @@
 ;; pin the clock, and enforce the exact installation/repository binding.
 ;; Passing these checks never issues, opens, persists or authorizes a token.
 (ns kagi.github-lease-policy
-  (:export [github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem github-lease-provider-response-problem])
+  (:export [github-app-jwt-signing-input github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem github-lease-provider-response-problem])
   (:require [jcs.reader :refer [json-valid? json-end json-kind json-member json-element json-count json-string json-int-ok? json-int]]))
+
+;; Non-secret unsigned JWT signing input only. A trusted host must bind the
+;; App ID and fresh clock to the approved issuer and sign with a qualified
+;; RS256 provider. This output is not a JWT, credential or issuance authority.
+(defn- glp-b64url-char [n :i64] :string
+  (string-substring "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" n (+ n 1)))
+(defn- glp-b64url [s :string] :string
+  (let [b (vector-i64-from-bytes (string-to-utf8 s)) n (vector-count b)]
+    (loop [i 0 out ""]
+      (if (>= i n) out
+        (let [a (vector-at b i) have-b (< (+ i 1) n) have-c (< (+ i 2) n)
+              x (if have-b (vector-at b (+ i 1)) 0) y (if have-c (vector-at b (+ i 2)) 0)
+              part (str (glp-b64url-char (quot a 4))
+                        (glp-b64url-char (+ (* (rem a 4) 16) (quot x 16)))
+                        (if have-b (glp-b64url-char (+ (* (rem x 16) 4) (quot y 64))) "")
+                        (if have-c (glp-b64url-char (rem y 64)) ""))]
+          (recur (+ i 3) (str out part)))))))
+
+(defn github-app-jwt-signing-input [app-id :i64 now :i64] :string
+  (if (or (< app-id 1) (> app-id 9007199254740991)
+          (< now 61) (> now (- 9007199254740991 300))) ""
+    (let [header "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+          claims (str "{\"exp\":" (+ now 300) ",\"iat\":" (- now 60)
+                      ",\"iss\":\"" app-id "\"}")]
+      (str (glp-b64url header) "." (glp-b64url claims)))))
 
 (defn- glp-repo? [s :string] :bool
   (let [n (string-byte-length s)]

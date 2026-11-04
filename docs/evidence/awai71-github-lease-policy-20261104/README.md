@@ -138,3 +138,26 @@ component assembler, a verified source-lock/import build or production CI.
 It has no network or secret inputs and does not qualify issuer, sealing,
 authentication, host or selfhost. Before integration, the native build must
 bind the reader and the actual imported module through its own reviewed lock.
+
+## Non-secret GitHub App JWT signing input
+
+The policy candidate now constructs the unsigned `header.payload` bytes for a
+GitHub App RS256 JWT, with a positive numeric App ID, `iat` 60 seconds before
+the trusted caller's time and `exp` 300 seconds after it. Invalid or
+unrepresentable ID/time inputs return empty. The encoding uses unpadded
+base64url and contains only fixed JSON plus decimal numbers. GitHub documents
+RS256, the issuer, clock-skew recommendation and a maximum expiration window:
+<https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-json-web-token-jwt-for-a-github-app>.
+
+The pinned local Darwin native diagnostic accepted an independently generated
+fixed test vector, rejected invalid App ID/time, and detected separate clock
+guard and expiry mutations. Its native diagnostic assembler also reproduced
+the selected source fixture. Policy/source-unity/image SHA-256:
+`88f8d4c590f7e4ed3b1909da782563e860858056e594104d7812bbff40a65b9f` /
+`124ed0a946763740dc1bf19dbbaf37434f30f489346dbce6844f5aa793a7e8f3` /
+`07130d634d8216352404e8d8b7db472dc6aa625173d1703ab1c792f6defb96ae`.
+
+This is only an unsigned input, not a JWT or an authorization. Trusted clock,
+issuer binding, RS256 private-key custody and signing, GitHub transport, token
+issuance, sealing, revocation, host integration and selfhost qualification
+remain open. No secret, real App or GitHub issuance was used in this test.
