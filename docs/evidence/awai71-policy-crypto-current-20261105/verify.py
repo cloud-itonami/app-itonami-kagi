@@ -16,6 +16,8 @@ def build(label,group,mutate):
   k='kagi/github_token_response.kotoba';old=b'(= (gt-str b root "repository_selection") "selected")';assert files[k].count(old)==1;files[k]=files[k].replace(old,b'true')
  if mutate=='both':
   k='kagi/github_lease_policy.kotoba';old=b'(not (= selection "selected"))';assert files[k].count(old)==1;files[k]=files[k].replace(old,b'false')
+ if mutate=='issuer-mismatch':
+  k='kagi/github_issuance_envelope.kotoba';old=b'(not (gi-equal? (ed/public-from-seed issuer-seed) issuer))';assert files[k].count(old)==1;files[k]=files[k].replace(old,b'false')
  # Check every copied crypto dependency against the previously recorded lock.
  for line in (repo/'docs/evidence/awai71-github-token-validation-20261103/integrated.ksl').read_text().splitlines():
   if line.startswith('file '):
@@ -29,6 +31,6 @@ def build(label,group,mutate):
  flags=['--source-path',rel,'--source-lock',lock.name,'--source-lock-sha256',hashlib.sha256(lock.read_bytes()).hexdigest()];entry=rel+'/pq/entry.kotoba'
  call(label+'-check',[compiler,'check',entry,*flags]);call(label+'-compile',[compiler,'compile',entry,'--target','aarch64-macos','--output',label+'.kseed',*flags]);out=call(label+'-extract',[compiler,'extract-native',label+'.kseed','--symbol','main','--output',label+'.raw']);m=re.search(rb':offset (\d+), :length (\d+), :arity 0\}',out);assert m
  call(label+'-pack',[pack,label+'-unsigned.macho',label+'.raw','fs2-cli-stdio-general',m.group(1).decode()]);binary=base/(label+'.macho');shutil.copyfile(base/(label+'-unsigned.macho'),binary);os.chmod(binary,0o700);subprocess.run(['/usr/bin/codesign','--force','--sign','-',str(binary)],check=True,capture_output=True)
- r=subprocess.run([str(binary)],cwd=base,pass_fds=(fd,),capture_output=True,env={'PATH':'/nonexistent'},timeout=12,preexec_fn=lim);print(label+'-result',r.returncode,flush=True);expected=29 if mutate=='both' else 31;assert r.returncode==expected,(r.returncode,r.stderr)
+ r=subprocess.run([str(binary)],cwd=base,pass_fds=(fd,),capture_output=True,env={'PATH':'/nonexistent'},timeout=12,preexec_fn=lim);print(label+'-result',r.returncode,flush=True);expected=253 if mutate=='both' else (191 if mutate=='issuer-mismatch' else 255);assert r.returncode==expected,(r.returncode,r.stderr)
  print(label+'-sha256',hashlib.sha256(binary.read_bytes()).hexdigest(),'lock-sha256',hashlib.sha256(lock.read_bytes()).hexdigest(),flush=True)
-build('valid','a','none');build('token-guard-mutant','a','token-only');build('both-guards-mutant','a','both');os.close(fd);shutil.rmtree(base)
+build('valid','a','none');build('token-guard-mutant','a','token-only');build('both-guards-mutant','a','both');build('issuer-mutant','a','issuer-mismatch');os.close(fd);shutil.rmtree(base)

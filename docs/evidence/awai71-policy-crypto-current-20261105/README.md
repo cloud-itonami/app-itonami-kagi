@@ -30,10 +30,38 @@ Source-lock and signed image SHA-256 pairs:
 - Both guards removed: `d2de90fa186353148d47d2cc3b73766eeb6edf5b7dd924929c4e677318a0ea3d` / `9e7c5a3bc187a96d0c77abbcd6e627535c7d60ec6bf9866235b4d0315435d680`.
 
 The fixture processes had a three-second CPU cap without a hard memory cap.
-`verify.py` SHA-256
+The earlier version of `verify.py` had SHA-256
 `e1b2fd01b72a16a466b8f979b08c3f78d3761e39064b4c86e6724d058005325d`
 uses local absolute paths and historical pinned crypto dependencies. This is a
 synthetic integration test, not a production broker. The authenticated
 requester, App issuer, HTTPS transport, actual installation token, secret
 storage/delivery, revocation, replay handling, and runtime source closure are
 still unqualified. It does not qualify a resource governor or bot deployment.
+
+## Signed issuance composition
+
+`github-checkpoint-signed-issue` now composes the existing approved seal
+with an issuer signature over the exact recipient, provider expiry and
+canonical context. It returns `signature(64) || envelope`, or an empty vector
+on refusal. It requires the independently supplied issuer public key to be a
+valid prime-order key and to match the supplied 32-byte seed. This is a
+byte-level experimental component: it does not authenticate the host inputs,
+protect or erase keys, issue a GitHub token, enforce replay, or reconcile an
+unsealed upstream token.
+
+The updated source-locked native fixture returned bitmask 255: in addition to
+the previous controls, the newly composed output opened successfully; a
+different valid issuer, a short seed and a tampered signature were refused.
+The token-selection-only mutant still returned 255; removing both selection
+guards returned 253. Removing the seed-to-issuer match returned 191, showing
+that the valid-but-different issuer case exercises that check. Current source
+SHA-256 values: issuance component
+`f6fbe14bf4d0d71c185a82c3192b5ee95a1e16678fffad9ea3b5d5179f638b4d`;
+test `16f7ca48fe3f8b5fc50bf5a937d2d1e2fd65b14c18260a13b21359a893ef2fc4`;
+test harness `e478157cb8e8456172170f2fa42d4bc4d5df22f9bfe12be03a479cce606d5e15`.
+The current signed image SHA-256 was
+`fc36bf13cdbea088f7694fe5861be2825bc40e3059c3fa539460538f73ee1d85`;
+its source lock SHA-256 was
+`14ecff001183ab4a00745d11a052054ca1946ea88890ceaa7a42d1020e205a49`.
+The source-locked diagnostic used synthetic data and the same compiler,
+packager and CPU limit above. Full host, GitHub and governor gates remain open.

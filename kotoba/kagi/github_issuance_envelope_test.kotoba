@@ -42,5 +42,17 @@
                     (string-replace-all (string-from-utf8 (bytes-from-vector-i64 good))
                                         "\"token\":\"synthetic-token\"" "\"token\":\"synthetic-token\",\"token\":\"second\"")))
         e (= (vector-count (i/github-checkpoint-seal-approved duplicate 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
-                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)]
-    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0))))
+                                                              "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6))) 0)
+        issued (i/github-checkpoint-signed-issue good 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
+                                                  "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6) seed issuer)
+        issued-sig (if (> (vector-count issued) 64) (gi-slice issued 0 64) (vector-i64))
+        issued-box (if (> (vector-count issued) 64) (gi-slice issued 64 (- (vector-count issued) 64)) (vector-i64))
+        f (gi-eq (e/github-checkpoint-open recipient issued-box issuer issued-sig xs dk "bot-one" "host-one" id now expires now)
+                 (vector-i64-from-bytes (string-to-utf8 "synthetic-token")))
+        wrong-issuer (= (vector-count (i/github-checkpoint-signed-issue good 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
+                                                                         "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6) seed (ed/public-from-seed (gi-fill 32 8)))) 0)
+        wrong-seed (= (vector-count (i/github-checkpoint-signed-issue good 201 now [3600 3600 123] "cloud-itonami/itonami-bot-state" "bot-one" true recipient
+                                                                       "bot-one" "host-one" id (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6) (gi-fill 31 9) issuer)) 0)
+        bad-sig (if (= (vector-count issued-sig) 64) (vector-assoc! issued-sig 0 (bit-xor (vector-at issued-sig 0) 1)) (vector-i64))
+        tampered (gi-eq (e/github-checkpoint-open recipient issued-box issuer bad-sig xs dk "bot-one" "host-one" id now expires now) (vector-i64 -1))]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if (and wrong-issuer wrong-seed) 64 0) (if tampered 128 0))))

@@ -6,8 +6,23 @@
 ;; network client, credential issuer, replay ledger or qualified secret host.
 (ns kagi.github-issuance-envelope
   (:require [kagi.github-token-response :as response] [kagi.credential-envelope :as envelope]
-            [kagi.github-lease-policy :as policy])
-  (:export [github-checkpoint-seal-approved]))
+            [kagi.github-lease-policy :as policy] [ed25519.selfhost :as ed])
+  (:export [github-checkpoint-seal-approved github-checkpoint-signed-issue]))
+
+(defn- gi-bytes? [v :vector-i64] :bool
+  (loop [i 0]
+    (if (= i (vector-count v)) true
+      (and (>= (vector-at v i) 0) (<= (vector-at v i) 255) (recur (+ i 1))))))
+(defn- gi-equal? [a :vector-i64 b :vector-i64] :bool
+  (and (= (vector-count a) (vector-count b))
+       (loop [i 0]
+         (if (= i (vector-count a)) true
+           (and (= (vector-at a i) (vector-at b i)) (recur (+ i 1)))))))
+(defn- gi-join [a :vector-i64 b :vector-i64] :vector-i64
+  (let [n (vector-count a) m (vector-count b)]
+    (loop [i 0 out (vector-alloc (+ n m))]
+      (if (= i (+ n m)) out
+        (recur (+ i 1) (vector-assoc! out i (if (< i n) (vector-at a i) (vector-at b (- i n)))))))))
 
 (defn- github-checkpoint-seal-response [body :vector-i64 status :i64 repo-id :i64 now-ms :i64
                                       recipient :vector-i64 principal :string audience :string lease-id :string
@@ -42,3 +57,29 @@
         (if (or (< expiry 0) (> expiry (+ now-ms (* ttl 1000)))) (vector-i64)
           (github-checkpoint-seal-response body status repo-id now-ms recipient principal audience lease-id
                                            ephemeral message-random nonce))))))
+
+;; Experimental byte-level composition for a trusted host. Returns exactly
+;; signature(64) || encrypted envelope, or [] on refusal. The independently
+;; pinned issuer must match the seed; the signature covers the same recipient,
+;; provider-reported expiry and policy-bound context used by the envelope.
+;; This is not an issuer, secure key handle, replay journal or deployment
+;; authorization. The host must authenticate policy and requester, pin the
+;; provider/clock, protect and erase secrets, and reconcile failed issuance.
+(defn github-checkpoint-signed-issue [body :vector-i64 status :i64 now-ms :i64 budget :vector-i64
+                                     policy-repo :string policy-principal :string allow-write :bool
+                                     recipient :vector-i64 principal :string audience :string lease-id :string
+                                     ephemeral :vector-i64 message-random :vector-i64 nonce :vector-i64
+                                     issuer-seed :vector-i64 issuer :vector-i64] :vector-i64
+  (if (or (not (= (vector-count issuer-seed) 32)) (not (gi-bytes? issuer-seed))
+          (not (= (vector-count issuer) 32)) (not (gi-bytes? issuer))
+          (not (ed/prime-order-key? issuer)) (not (gi-equal? (ed/public-from-seed issuer-seed) issuer)))
+    (vector-i64)
+    (let [box (github-checkpoint-seal-approved body status now-ms budget policy-repo policy-principal allow-write
+                                                recipient principal audience lease-id ephemeral message-random nonce)
+          expiry (if (= (vector-count budget) 3)
+                   (response/github-checkpoint-token-expiry body status (vector-at budget 2) now-ms) -1)
+          context (if (> expiry now-ms) (envelope/github-checkpoint-context principal audience lease-id now-ms expiry) (vector-i64))
+          message (envelope/credential-signing-message recipient context box) signature (vector-alloc 64)]
+      (if (not (= (vector-count message) 32)) (vector-i64)
+        (if (= (ed/sign-into signature issuer-seed message) 0)
+          (gi-join signature box) (vector-i64))))))
