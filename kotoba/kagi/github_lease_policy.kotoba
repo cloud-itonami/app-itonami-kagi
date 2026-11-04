@@ -3,7 +3,8 @@
 ;; pin the clock, and enforce the exact installation/repository binding.
 ;; Passing these checks never issues, opens, persists or authorizes a token.
 (ns kagi.github-lease-policy
-  (:export [github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem]))
+  (:export [github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem github-lease-provider-response-problem])
+  (:require [jcs.reader :refer [json-valid? json-end json-kind json-member json-element json-count json-string json-int-ok? json-int]]))
 
 (defn- glp-repo? [s :string] :bool
   (let [n (string-byte-length s)]
@@ -94,3 +95,76 @@
                 (not (= returned-metadata "read")) (not (= permission-count 2))) "lease/provider-permission-refused"
             (not (= (github-lease-expiry-problem now ttl expires) "lease/expiry-eligible")) "lease/provider-expiry-refused"
             :else "lease/provider-eligible"))))
+
+
+(defn- glp-utc-digit? [s :string i :i64] :bool
+  (let [c (string-code-point-at s i)] (and (>= c 48) (<= c 57))))
+(defn- glp-utc-num [s :string start :i64 end :i64] :i64
+  (loop [i start n 0] (if (= i end) n (recur (+ i 1) (+ (* n 10) (- (string-code-point-at s i) 48))))))
+(defn- glp-leap? [year :i64] :bool
+  (and (= (rem year 4) 0) (or (not (= (rem year 100) 0)) (= (rem year 400) 0))))
+(defn- glp-month-days [year :i64 month :i64] :i64
+  (cond (= month 2) (if (glp-leap? year) 29 28)
+        (or (= month 4) (= month 6) (= month 9) (= month 11)) 30
+        (and (>= month 1) (<= month 12)) 31 :else 0))
+;; GitHub's observed/documented Zulu-second form only. Fractional seconds,
+;; offsets, leap seconds and years outside 2020..2100 deliberately refuse.
+(defn- glp-utc-seconds [s :string] :i64
+  (if (not (= (string-byte-length s) 20)) -1
+    (let [digits (loop [i 0]
+                   (if (= i 20) true
+                     (if (or (= i 4) (= i 7) (= i 10) (= i 13) (= i 16) (= i 19))
+                       (recur (+ i 1)) (if (glp-utc-digit? s i) (recur (+ i 1)) false))))]
+      (if (not (and digits (= (string-substring s 4 5) "-") (= (string-substring s 7 8) "-")
+                    (= (string-substring s 10 11) "T") (= (string-substring s 13 14) ":")
+                    (= (string-substring s 16 17) ":") (= (string-substring s 19 20) "Z"))) -1
+        (let [year (glp-utc-num s 0 4) month (glp-utc-num s 5 7) day (glp-utc-num s 8 10)
+              hour (glp-utc-num s 11 13) minute (glp-utc-num s 14 16) second (glp-utc-num s 17 19)]
+          (if (or (< year 2020) (> year 2100) (< month 1) (> month 12) (< day 1)
+                  (> day (glp-month-days year month)) (> hour 23) (> minute 59) (> second 59)) -1
+            (let [yd (loop [y 1970 n 0] (if (= y year) n (recur (+ y 1) (+ n (if (glp-leap? y) 366 365)))))
+                  md (loop [m 1 n 0] (if (= m month) n (recur (+ m 1) (+ n (glp-month-days year m)))))]
+              (+ (* (+ yd md (- day 1)) 86400) (* hour 3600) (* minute 60) second))))))))
+
+(defn- glp-json-string [b :vector-i64 obj :i64 key :string] :string
+  (let [p (json-member b obj key)] (if (and (>= p 0) (= (json-kind b p) 3)) (json-string b p) "")))
+
+;; Inspect token bytes in place. Refuse JSON escapes/control bytes rather than
+;; allowing a later header or credential adapter to reinterpret them. This is
+;; a conservative lexical envelope, not token authentication or a format pin.
+(defn- glp-token-raw? [b :vector-i64 p :i64] :bool
+  (if (or (< p 0) (not (= (json-kind b p) 3))) false
+    (let [end (json-end b p) n (- end p 2)]
+      (and (>= n 1) (<= n 512)
+        (loop [i (+ p 1)]
+          (if (= i (- end 1)) true
+            (let [c (vector-at b i)]
+              (if (or (and (>= c 48) (<= c 57)) (and (>= c 65) (<= c 90))
+                      (and (>= c 97) (<= c 122)) (= c 95) (= c 45))
+                (recur (+ i 1)) false))))))))
+
+;; A bounded complete response is validated as one document. No token bytes
+;; are decoded, returned or logged here. The host must protect and later seal
+;; the original response, and verify TLS, installation, identity and request.
+(defn github-lease-provider-response-problem [expected-repo :string expected-id :i64 permission :string
+                                             now :i64 ttl :i64 body :vector-i64] :string
+  (if (or (= (vector-count body) 0) (> (vector-count body) 262144)
+          (not (= (vector-at body 0) 123)) (not (json-valid? body)) (not (= (json-kind body 0) 1)))
+    "lease/provider-json-refused"
+    (let [token (json-member body 0 "token") repos (json-member body 0 "repositories")
+          perms (json-member body 0 "permissions") first (if (= (json-kind body repos) 2) (json-element body repos 0) -1)
+          id (if (= (json-kind body first) 1) (json-member body first "id") -1)
+          private (if (= (json-kind body first) 1) (json-member body first "private") -1)
+          token-ok (glp-token-raw? body token)
+          repo-name (if (>= first 0) (glp-json-string body first "full_name") "")
+          repo-id (if (and (>= id 0) (json-int-ok? body id)) (json-int body id) -1)
+          repo-count (if (= (json-kind body repos) 2) (json-count body repos) -1)
+          perm-count (if (= (json-kind body perms) 1) (json-count body perms) -1)
+          selection (glp-json-string body 0 "repository_selection")
+          contents (if (>= perms 0) (glp-json-string body perms "contents") "")
+          metadata (if (>= perms 0) (glp-json-string body perms "metadata") "")
+          expires (glp-utc-seconds (glp-json-string body 0 "expires_at"))]
+      (cond (not token-ok) "lease/provider-token-refused"
+            (not (= (json-kind body private) 5)) "lease/provider-private-refused"
+            :else (github-lease-provider-problem expected-repo repo-name selection permission contents metadata
+                    [expected-id repo-id repo-count perm-count now ttl expires])))))

@@ -46,10 +46,9 @@ one selected repository, exact name and ID, exactly the requested contents
 permission plus metadata read, and a valid bounded expiry. Missing or extra
 scope/permissions refuse. It is deliberately conservative and may reject a
 legitimate response that has a different documented representation; actual API
-compatibility has not been tested. No parser is included, and caller-supplied
-counts are not proof of response contents. A future bounded parser must reject
-duplicate keys and bind every field to one authenticated response without
-logging or persisting the token. This function does not accept token bytes.
+compatibility has not been tested. Caller-supplied counts alone are not proof of response contents. The lower-level
+metadata function does not accept token bytes and must not be used as a
+substitute for validating the authenticated provider response.
 
 The updated selected source composition passed the pinned diagnostic Amu
 source check and the local signed native fixture, including exact request body,
@@ -59,3 +58,28 @@ mutant. Source SHA-256 was
 signed fixture SHA-256 was
 `2fe0aaa64dd839e5270fdcd69a43d79830cc52e6622637ed630b93c6282d67b3`.
 No App, credential, network request or token was created by this test.
+
+## Bounded provider JSON validation
+
+`github-lease-provider-response-problem` validates one bounded response using
+`jcs.reader` (which refuses duplicate and escaped keys), checks a nonempty
+ASCII-safe unescaped token in place without decoding or returning it, and binds
+one private selected repository's name and ID, the exact two allowed
+permissions, and the response expiry. Its timestamp parser accepts only UTC
+second timestamps for years 2020–2100 and rejects invalid calendar dates;
+fractional/offset timestamps conservatively refuse. The response bytes still
+contain a secret and must stay within a trusted host's bounded protected memory;
+this pure check does not implement secure erasure, locking, transport or seal.
+
+A signed diagnostic Mac native fixture composed the actual reader, policy and
+synthetic non-secret provider examples. It tested acceptance and refusal for
+wrong ID, multiple repositories, public repo, too-broad/extra permissions,
+duplicate keys, empty or escaped-control token, expired deadline and invalid
+calendar values; the repository policy mutant still failed. Selected source
+check and native execution passed. Fixture SHA-256:
+`72b8c929bf12382ab318c04f82ae326c25bd4a5e5d3673a94e9a5bb68fb4a2ab`;
+signed fixture SHA-256:
+`408784f502e2d94e6755d33ec433ac6a75fbb2b713c13b94589d459b7b3beee6`.
+These are synthetic fixtures, not a live GitHub response, authenticated TLS,
+provider response compatibility, authorization, token sealing, revocation,
+qualified host or selfhost build.

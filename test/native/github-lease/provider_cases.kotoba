@@ -1,0 +1,22 @@
+(ns kagi.github-lease-provider-test (:export [test-github-provider]))
+(defn- glpt-bytes [s :string] :vector-i64 (vector-i64-from-bytes (string-to-utf8 s)))
+(defn test-github-provider [] :bool
+  (let [repo "cloud-itonami/itonami-bot-state"
+        base "{\"token\":\"synthetic\",\"expires_at\":\"2026-01-01T01:00:00Z\",\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"},\"repository_selection\":\"selected\",\"repositories\":[{\"id\":1443502872,\"full_name\":\"cloud-itonami/itonami-bot-state\",\"private\":true}]}"
+        read-response (glpt-bytes base) now 1767225600]
+    (and (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 read-response) "lease/provider-eligible")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:read" now 3600 read-response) "lease/provider-permission-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3599 read-response) "lease/provider-expiry-refused")
+         (= (github-lease-provider-response-problem repo 1443502873 "contents:write" now 3600 read-response) "lease/provider-repository-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"private\":true" "\"private\":false"))) "lease/provider-private-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"private\":true}]" "\"private\":true},{\"id\":2,\"full_name\":\"other/repo\",\"private\":true}]"))) "lease/provider-repository-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"token\":\"synthetic\"" "\"token\":\"synthetic\",\"token\":\"other\""))) "lease/provider-json-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"token\":\"synthetic\"" "\"token\":\"\""))) "lease/provider-token-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "synthetic" "bad\\nheader"))) "lease/provider-token-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"metadata\":\"read\"" "\"metadata\":\"read\",\"issues\":\"write\""))) "lease/provider-permission-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"repository_selection\":\"selected\"" "\"repository_selection\":\"all\""))) "lease/provider-repository-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "\"metadata\":\"read\"" "\"metadata\":\"read\",\"metadata\":\"write\""))) "lease/provider-json-refused")
+         (= (github-lease-provider-response-problem repo 1443502872 "contents:write" now 3600 (glpt-bytes (string-replace-all base "2026-01-01T01:00:00Z" "2026-02-30T01:00:00Z"))) "lease/provider-expiry-refused")
+         (= (glp-utc-seconds "2024-02-29T00:00:00Z") 1709164800)
+         (= (glp-utc-seconds "2100-02-29T00:00:00Z") -1)
+         (= (glp-utc-seconds "2026-01-01T01:00:00+00:00") -1))))
