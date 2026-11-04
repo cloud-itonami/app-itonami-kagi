@@ -2,10 +2,19 @@
 (defn main [] :i64
   (let [repo "cloud-itonami/itonami-bot-state" who "did:key:fixture" purpose "checkpoint-archive"]
     (if (and
-      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [3600 3600]) "lease/request-eligible")
-      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60 61]) "lease/ttl-refused")
-      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60]) "lease/ttl-refused")
-      (= (github-lease-request-problem repo who true "cloud-itonami/other" who purpose "contents:write" [60 60]) "lease/repository-refused")
+      (= (github-lease-request-body repo who true repo who purpose "contents:write" [3600 3600 1443502872]) "{\"permissions\":{\"contents\":\"write\",\"metadata\":\"read\"},\"repository_ids\":[1443502872]}")
+      (= (github-lease-request-body repo who true "cloud-itonami/other" who purpose "contents:write" [60 60 1443502872]) "")
+      (= (github-lease-request-body repo who true repo who purpose "contents:read" [60 60 0]) "")
+      (= (github-lease-provider-problem repo repo "selected" "contents:write" "write" "read" [1443502872 1443502872 1 2 100 60 160]) "lease/provider-eligible")
+      (= (github-lease-provider-problem repo repo "all" "contents:write" "write" "read" [1443502872 1443502872 1 2 100 60 160]) "lease/provider-repository-refused")
+      (= (github-lease-provider-problem repo repo "selected" "contents:write" "write" "read" [1443502872 123 1 2 100 60 160]) "lease/provider-repository-refused")
+      (= (github-lease-provider-problem repo repo "selected" "contents:read" "write" "read" [1443502872 1443502872 1 2 100 60 160]) "lease/provider-permission-refused")
+      (= (github-lease-provider-problem repo repo "selected" "contents:write" "write" "read" [1443502872 1443502872 1 3 100 60 160]) "lease/provider-permission-refused")
+      (= (github-lease-provider-problem repo repo "selected" "contents:write" "write" "read" [1443502872 1443502872 1 2 100 60 161]) "lease/provider-expiry-refused")
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [3600 3600 1443502872]) "lease/request-eligible")
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60 61 1443502872]) "lease/ttl-refused")
+      (= (github-lease-request-problem repo who true repo who purpose "contents:write" [60]) "lease/budget-invalid")
+      (= (github-lease-request-problem repo who true "cloud-itonami/other" who purpose "contents:write" [60 60 1443502872]) "lease/repository-refused")
       (= (github-lease-scope-problem repo who true repo who purpose "contents:write") "lease/scope-eligible")
       (= (github-lease-scope-problem repo who false repo who purpose "contents:read") "lease/scope-eligible")
       (= (github-lease-scope-problem repo who false repo who purpose "contents:write") "lease/write-refused")

@@ -3,7 +3,7 @@
 ;; pin the clock, and enforce the exact installation/repository binding.
 ;; Passing these checks never issues, opens, persists or authorizes a token.
 (ns kagi.github-lease-policy
-  (:export [github-lease-request-problem github-lease-expiry-problem]))
+  (:export [github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem]))
 
 (defn- glp-repo? [s :string] :bool
   (let [n (string-byte-length s)]
@@ -37,16 +37,31 @@
   (if (or (< max-ttl 1) (> max-ttl 3600) (< ttl 1) (> ttl max-ttl))
     "lease/ttl-refused" "lease/ttl-eligible"))
 
-;; Budget is exactly [owner-policy-max-ttl requested-ttl], both seconds.
+;; Budget is exactly [owner-policy-max-ttl requested-ttl repository-id].
+;; The trusted issuer must independently bind the repository ID to the exact
+;; approved full name and installation; neither name nor ID proves that link.
 ;; Both scope and budget must pass; neither result authorizes token issuance.
 (defn github-lease-request-problem [policy-repo :string policy-principal :string allow-write :bool
                                    repo :string principal :string purpose :string permission :string
                                    budget :vector-i64] :string
   (let [scope (github-lease-scope-problem policy-repo policy-principal allow-write repo principal purpose permission)]
     (cond (not (= scope "lease/scope-eligible")) scope
-          (not (= (vector-count budget) 2)) "lease/ttl-refused"
+          (not (= (vector-count budget) 3)) "lease/budget-invalid"
           (not (= (github-lease-ttl-problem (vector-at budget 0) (vector-at budget 1)) "lease/ttl-eligible")) "lease/ttl-refused"
+          (or (< (vector-at budget 2) 1) (> (vector-at budget 2) 9007199254740991)) "lease/repository-id-refused"
           :else "lease/request-eligible")))
+
+;; Build only the non-secret GitHub API body after the policy decision. The
+;; caller authenticates policy/principal and binds the pinned repository ID to
+;; the installed App. Empty means no request may be sent.
+(defn github-lease-request-body [policy-repo :string policy-principal :string allow-write :bool
+                                repo :string principal :string purpose :string permission :string
+                                budget :vector-i64] :string
+  (if (not (= (github-lease-request-problem policy-repo policy-principal allow-write repo principal purpose permission budget)
+              "lease/request-eligible")) ""
+    (str "{\"permissions\":{\"contents\":\""
+         (if (= permission "contents:write") "write" "read")
+         "\",\"metadata\":\"read\"},\"repository_ids\":[" (string-from-i64 (vector-at budget 2)) "]}")))
 
 ;; Provider time is untrusted until parsed/validated. A token that cannot be
 ;; proven live and within the authorized deadline is refused. Clock freshness,
@@ -56,3 +71,26 @@
             (> now (- 9223372036854775807 requested-ttl))) "lease/clock-or-ttl-invalid"
         (or (<= expires now) (> expires (+ now requested-ttl))) "lease/expiry-refused"
         :else "lease/expiry-eligible"))
+
+
+;; All values below must be extracted from one complete authenticated provider
+;; response by a duplicate-key-rejecting, bounded parser. Numeric fields are
+;; [expected-id returned-id repo-count permission-count now ttl expires].
+;; Token bytes must not enter logs, argv, diagnostics or this pure function.
+;; Missing/incomplete scope is unknown and therefore refused. Exact count 2 is
+;; deliberately conservative if the provider adds permissions in the future.
+(defn github-lease-provider-problem [expected-repo :string returned-repo :string selection :string
+                                    expected-permission :string returned-contents :string returned-metadata :string
+                                    fields :vector-i64] :string
+  (if (not (= (vector-count fields) 7)) "lease/provider-shape-refused"
+    (let [expected-id (vector-at fields 0) returned-id (vector-at fields 1)
+          repo-count (vector-at fields 2) permission-count (vector-at fields 3)
+          now (vector-at fields 4) ttl (vector-at fields 5) expires (vector-at fields 6)]
+      (cond (or (not (glp-repo? expected-repo)) (not (= expected-repo returned-repo))
+                (< expected-id 1) (> expected-id 9007199254740991) (not (= returned-id expected-id))
+                (not (= repo-count 1)) (not (= selection "selected"))) "lease/provider-repository-refused"
+            (or (not (or (= expected-permission "contents:read") (= expected-permission "contents:write")))
+                (not (= returned-contents (if (= expected-permission "contents:write") "write" "read")))
+                (not (= returned-metadata "read")) (not (= permission-count 2))) "lease/provider-permission-refused"
+            (not (= (github-lease-expiry-problem now ttl expires) "lease/expiry-eligible")) "lease/provider-expiry-refused"
+            :else "lease/provider-eligible"))))

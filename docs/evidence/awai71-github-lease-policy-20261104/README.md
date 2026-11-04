@@ -30,3 +30,32 @@ signed test image SHA-256:
 The fixed diagnostic compiler required the test unity to export only `main`;
 the module's independent export/import closure, selfhost build, real signed
 policy, host and GitHub behavior remain unqualified.
+
+## Scoped request and normalized provider metadata
+
+The candidate now requires a positive, exactly representable repository ID in
+the authorized request budget and constructs a non-secret GitHub installation
+token request body with exactly that one `repository_ids` entry and contents
+read/write plus metadata read. The trusted issuer must independently bind the
+ID to the owner-approved full name and installation. GitHub documents that an
+omitted repository restriction can grant access to all repositories in the
+installation: <https://docs.github.com/en/rest/apps/apps#create-an-installation-access-token-for-an-app>.
+
+A separate function checks **already parsed** non-secret provider metadata:
+one selected repository, exact name and ID, exactly the requested contents
+permission plus metadata read, and a valid bounded expiry. Missing or extra
+scope/permissions refuse. It is deliberately conservative and may reject a
+legitimate response that has a different documented representation; actual API
+compatibility has not been tested. No parser is included, and caller-supplied
+counts are not proof of response contents. A future bounded parser must reject
+duplicate keys and bind every field to one authenticated response without
+logging or persisting the token. This function does not accept token bytes.
+
+The updated selected source composition passed the pinned diagnostic Amu
+source check and the local signed native fixture, including exact request body,
+invalid ID, repository/permission/expiry refusals, and the repository-match
+mutant. Source SHA-256 was
+`97b7c5bb0f3c533869eee3bb9567d02aeaa97821725ab324fe80d38d2af69881`;
+signed fixture SHA-256 was
+`2fe0aaa64dd839e5270fdcd69a43d79830cc52e6622637ed630b93c6282d67b3`.
+No App, credential, network request or token was created by this test.
