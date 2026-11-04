@@ -59,9 +59,35 @@ SHA-256 values: issuance component
 `f6fbe14bf4d0d71c185a82c3192b5ee95a1e16678fffad9ea3b5d5179f638b4d`;
 test `16f7ca48fe3f8b5fc50bf5a937d2d1e2fd65b14c18260a13b21359a893ef2fc4`;
 test harness `e478157cb8e8456172170f2fa42d4bc4d5df22f9bfe12be03a479cce606d5e15`.
-The current signed image SHA-256 was
+The signed image for that run had SHA-256
 `fc36bf13cdbea088f7694fe5861be2825bc40e3059c3fa539460538f73ee1d85`;
 its source lock SHA-256 was
 `14ecff001183ab4a00745d11a052054ca1946ea88890ceaa7a42d1020e205a49`.
 The source-locked diagnostic used synthetic data and the same compiler,
 packager and CPU limit above. Full host, GitHub and governor gates remain open.
+
+## Receiving a signed issuance
+
+`github-checkpoint-open-issued` now consumes the exact `signature || envelope`
+format from `github-checkpoint-signed-issue`. It bounds the complete frame and
+delegates to the existing context, expiry, issuer-signature and decryption
+checks; invalid input returns `[-1]`. The authenticated issuer, clock,
+requester, replay and revocation policy, and safe handling of returned secret
+bytes remain host responsibilities.
+
+The current source-locked native integration returned bitmask 63 for a
+synthetic signed issuance: open succeeded, while expiry at the boundary,
+another valid issuer, short framing, altered signature and another audience
+were refused. A mutant substituting the issuance time for the receiver's
+current time returned 61, detecting expiry bypass. The previous issuance
+controls also passed (255; selection and issuer mutants 253 and 191). The
+receiver fixture image SHA-256 was
+`66ca4fa589fc9dcec5115ea671fcf8df5725812a41055263105991f265141f52`
+and source-lock SHA-256 was
+`854a99728d272ea18eb2fc98f95831d79ceb5ee4bb2abd88dd145a9533e4c4f`.
+Current credential module, integration test and harness SHA-256 values are
+`ed388308d4c5850c0638d1d031ae1c0bfdf3cf9322eba2e3c11fa254a2c1c456`,
+`958a9ab816be745e0504e90a6febd5d9713a73210da58473a8b97ac71a14c429`,
+and `d1b1dad76b40c998b7d11095a3a7823aa27d0a1c13d92b16f0fb5c35675fb89a`.
+These tests use synthetic token bytes and real cryptographic functions, not a
+live GitHub App, secure host, secret-delivery channel or qualified governor.

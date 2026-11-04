@@ -2,7 +2,7 @@
 (ns kagi.github-issuance-envelope-test
   (:require [kagi.github-issuance-envelope :as i] [kagi.credential-envelope :as e]
             [x25519.core :as x] [mlkem.core :as k] [ed25519.selfhost :as ed])
-  (:export [main]))
+  (:export [main issued-main]))
 (defn- gi-fill [n :i64 v :i64] :vector-i64
   (loop [i 0 b (vector-alloc n)] (if (= i n) b (recur (+ i 1) (vector-assoc! b i v)))))
 (defn- gi-slice [v :vector-i64 start :i64 n :i64] :vector-i64
@@ -56,3 +56,24 @@
         bad-sig (if (= (vector-count issued-sig) 64) (vector-assoc! issued-sig 0 (bit-xor (vector-at issued-sig 0) 1)) (vector-i64))
         tampered (gi-eq (e/github-checkpoint-open recipient issued-box issuer bad-sig xs dk "bot-one" "host-one" id now expires now) (vector-i64 -1))]
     (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if e 16 0) (if f 32 0) (if (and wrong-issuer wrong-seed) 64 0) (if tampered 128 0))))
+
+;; Exercise the exact signature || envelope consumed by the receiving API.
+(defn issued-main [] :i64
+  (let [now 1793664000000 expires 1793665800000 xs (gi-fill 32 3)
+        kp (k/keygen (gi-fill 32 1) (gi-fill 32 2)) dk (gi-slice kp 1184 2400)
+        recipient (gi-cat (x/public-key xs) (gi-slice kp 0 1184))
+        id "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        seed (gi-fill 32 9) issuer (ed/public-from-seed seed)
+        issued (i/github-checkpoint-signed-issue (gi-response "selected" "2026-11-03T00:30:00Z") 201 now [3600 3600 123]
+                 "cloud-itonami/itonami-bot-state" "bot-one" true recipient "bot-one" "host-one" id
+                 (gi-fill 32 4) (gi-fill 32 5) (gi-fill 12 6) seed issuer)
+        n (vector-count issued) altered (if (> n 0) (gi-slice issued 0 n) (vector-i64))
+        flipped (if (> n 0) (vector-assoc! altered 0 (bit-xor (vector-at altered 0) 1)) altered)
+        expected (vector-i64-from-bytes (string-to-utf8 "synthetic-token"))
+        a (gi-eq (e/github-checkpoint-open-issued recipient issued issuer xs dk "bot-one" "host-one" id now expires now) expected)
+        b (gi-eq (e/github-checkpoint-open-issued recipient issued issuer xs dk "bot-one" "host-one" id now expires expires) (vector-i64 -1))
+        c (gi-eq (e/github-checkpoint-open-issued recipient issued (ed/public-from-seed (gi-fill 32 8)) xs dk "bot-one" "host-one" id now expires now) (vector-i64 -1))
+        d (gi-eq (e/github-checkpoint-open-issued recipient (gi-fill 1216 0) issuer xs dk "bot-one" "host-one" id now expires now) (vector-i64 -1))
+        f (gi-eq (e/github-checkpoint-open-issued recipient flipped issuer xs dk "bot-one" "host-one" id now expires now) (vector-i64 -1))
+        g (gi-eq (e/github-checkpoint-open-issued recipient issued issuer xs dk "bot-one" "other-host" id now expires now) (vector-i64 -1))]
+    (+ (if a 1 0) (if b 2 0) (if c 4 0) (if d 8 0) (if f 16 0) (if g 32 0))))
