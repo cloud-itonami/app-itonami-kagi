@@ -40,11 +40,18 @@
             months (loop [i 1 days 0] (if (= i m) days (recur (+ i 1) (+ days (gt-month-days y i)))))
             days (+ (+ years months) (- d 1))]
         (* (+ (+ (* days 86400) (* h 3600)) (+ (* minute 60) second)) 1000)))))
-(defn- gt-token? [v :vector-i64] :bool
-  ;; Do not assume the historical fixed GitHub token length or prefix.
-  (and (> (vector-count v) 0) (<= (vector-count v) 4096)
-    (loop [i 0] (if (= i (vector-count v)) true
-      (let [c (vector-at v i)] (if (and (>= c 33) (<= c 126)) (recur (+ i 1)) false))))))
+;; Validate the raw JSON token in place, before decoding. The issuance policy
+;; also refuses escapes; accepting them here would produce a different lexical
+;; interpretation and an avoidable extra plaintext vector during validation.
+(defn- gt-token-raw? [b :vector-i64 p :i64] :bool
+  (if (or (< p 0) (not (= (j/json-kind b p) 3))) false
+    (let [end (j/json-end b p) n (- end p 2)]
+      (and (> n 0) (<= n 4096)
+        (loop [i (+ p 1)]
+          (if (= i (- end 1)) true
+            (let [c (vector-at b i)]
+              (and (>= c 33) (<= c 126) (not (= c 34)) (not (= c 92))
+                   (recur (+ i 1))))))))))
 (defn- gt-valid? [b :vector-i64 status :i64 repo-id :i64 now-ms :i64] :bool
   (let [root (gt-root b)]
     (and (= status 201) (> repo-id 0) (>= now-ms 0) (<= (vector-count b) 65536) (j/json-valid? b)
@@ -53,14 +60,15 @@
                first (j/json-element b repos 0) id (j/json-member b first "id")
                private (j/json-member b first "private") token (j/json-member b root "token")
                expiry (gt-expiry (gt-str b root "expires_at"))]
-           (and (= (gt-str b root "repository_selection") "selected")
+           (and (< (j/json-member b root "error") 0)
+                (= (gt-str b root "repository_selection") "selected")
                 (= (j/json-kind b perms) 1) (= (j/json-count b perms) 2)
                 (= (gt-str b perms "contents") "write") (= (gt-str b perms "metadata") "read")
                 (= (j/json-kind b repos) 2) (= (j/json-count b repos) 1)
                 (= (j/json-kind b first) 1) (= (gt-str b first "full_name") "cloud-itonami/itonami-bot-state")
                 (= (j/json-kind b private) 5) (= (j/json-kind b id) 4) (j/json-int-ok? b id)
                 (= (j/json-int b id) repo-id) (= (j/json-kind b token) 3)
-                (gt-token? (j/json-string-bytes b token))
+                (gt-token-raw? b token)
                 (> expiry now-ms) (<= (- expiry now-ms) 3600000))))))
 ;; The host may use the validated reported expiry when constructing the
 ;; signed lease context, never an invented later expiration.

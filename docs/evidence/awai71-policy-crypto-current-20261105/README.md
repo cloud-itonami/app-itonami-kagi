@@ -1,0 +1,169 @@
+# Current policy and real cryptographic envelope
+
+On 2026-11-05 the current Kagi policy, provider-response validation,
+`github-checkpoint-seal-approved`, credential envelope and updated synthetic
+integration test were assembled with source-locked crypto/JCS dependencies.
+The source lock was checked and the generated native Darwin ARM64 image ran
+with real X25519, ML-KEM, ChaCha20-Poly1305 and Ed25519 code. A synthetic
+eligible token sealed, signed and opened; wider repository selection,
+expired response, wrong HTTP status and a duplicate token field in an
+otherwise complete response were refused. The test returned its full bitmask
+31. No real token, request or GitHub operation was used.
+
+The candidate intentionally validates repository selection in both the policy
+and token-response layers. Removing only the token-response selection check
+still returned 31 because policy rejected the wider scope first. Removing both
+selection checks produced 29, exposing the wider-selection negative case.
+This is a two-guard mutation, not evidence that either individual layer alone
+was tested here. The complete duplicate-key input avoids the earlier weak
+case that was missing other required fields and would have failed regardless.
+
+The pinned compiler and diagnostic packager SHA-256 were
+`920954769b8fdc51cf50dfcab5c44a4e56cf01f261806a153b21488ba81ac4e6` and
+`f726f9dd8a4f169187275797a74d55ad3c62cc5f681cd31f19e1a28d67834f8d`;
+both signatures were checked. The integration test source SHA-256 was
+`438db1c5ccef459a1d089a78df809612f95cd78ea54989674f2c34ee25df66cf`.
+Source-lock and signed image SHA-256 pairs:
+
+- Current: `c1426f748aba81dff6c28ed1138390a5d25151bffeb22ad07351779f62bc6f4c` / `b8da3861e65d953a729634c7c890528e519da453fd6207a97f9da87f9d8eca83`.
+- Token guard removed: `f028b7400259f64d3550b9cea2fd4c1282cb95cd1cef3a1eec6b9a7d838de6e0` / `719445f82c83bc6838fe1651c764f1b6506e369322c12cdb1a837862a9937f89`.
+- Both guards removed: `d2de90fa186353148d47d2cc3b73766eeb6edf5b7dd924929c4e677318a0ea3d` / `9e7c5a3bc187a96d0c77abbcd6e627535c7d60ec6bf9866235b4d0315435d680`.
+
+The fixture processes had a three-second CPU cap without a hard memory cap.
+The earlier version of `verify.py` had SHA-256
+`e1b2fd01b72a16a466b8f979b08c3f78d3761e39064b4c86e6724d058005325d`
+uses local absolute paths and historical pinned crypto dependencies. This is a
+synthetic integration test, not a production broker. The authenticated
+requester, App issuer, HTTPS transport, actual installation token, secret
+storage/delivery, revocation, replay handling, and runtime source closure are
+still unqualified. It does not qualify a resource governor or bot deployment.
+
+## Signed issuance composition
+
+`github-checkpoint-signed-issue` now composes the existing approved seal
+with an issuer signature over the exact recipient, provider expiry and
+canonical context. It returns `signature(64) || envelope`, or an empty vector
+on refusal. It requires the independently supplied issuer public key to be a
+valid prime-order key and to match the supplied 32-byte seed. This is a
+byte-level experimental component: it does not authenticate the host inputs,
+protect or erase keys, issue a GitHub token, enforce replay, or reconcile an
+unsealed upstream token.
+
+The updated source-locked native fixture returned bitmask 255: in addition to
+the previous controls, the newly composed output opened successfully; a
+different valid issuer, a short seed and a tampered signature were refused.
+The token-selection-only mutant still returned 255; removing both selection
+guards returned 253. Removing the seed-to-issuer match returned 191, showing
+that the valid-but-different issuer case exercises that check. Current source
+SHA-256 values: issuance component
+`f6fbe14bf4d0d71c185a82c3192b5ee95a1e16678fffad9ea3b5d5179f638b4d`;
+test `16f7ca48fe3f8b5fc50bf5a937d2d1e2fd65b14c18260a13b21359a893ef2fc4`;
+test harness `e478157cb8e8456172170f2fa42d4bc4d5df22f9bfe12be03a479cce606d5e15`.
+The signed image for that run had SHA-256
+`fc36bf13cdbea088f7694fe5861be2825bc40e3059c3fa539460538f73ee1d85`;
+its source lock SHA-256 was
+`14ecff001183ab4a00745d11a052054ca1946ea88890ceaa7a42d1020e205a49`.
+The source-locked diagnostic used synthetic data and the same compiler,
+packager and CPU limit above. Full host, GitHub and governor gates remain open.
+
+## Receiving a signed issuance
+
+`github-checkpoint-open-issued` now consumes the exact `signature || envelope`
+format from `github-checkpoint-signed-issue`. It bounds the complete frame and
+delegates to the existing context, expiry, issuer-signature and decryption
+checks; invalid input returns `[-1]`. The authenticated issuer, clock,
+requester, replay and revocation policy, and safe handling of returned secret
+bytes remain host responsibilities.
+
+The current source-locked native integration returned bitmask 63 for a
+synthetic signed issuance: open succeeded, while expiry at the boundary,
+another valid issuer, short framing, altered signature and another audience
+were refused. A mutant substituting the issuance time for the receiver's
+current time returned 61, detecting expiry bypass. The previous issuance
+controls also passed (255; selection and issuer mutants 253 and 191). The
+receiver fixture image SHA-256 was
+`66ca4fa589fc9dcec5115ea671fcf8df5725812a41055263105991f265141f52`
+and source-lock SHA-256 was
+`854a99728d272ea18eb2fc98f95831d79ceb5ee4bb2abd88dd145a9533e4c4f`.
+At that run, credential module, integration test and harness SHA-256 values were
+`ed388308d4c5850c0638d1d031ae1c0bfdf3cf9322eba2e3c11fa254a2c1c456`,
+`958a9ab816be745e0504e90a6febd5d9713a73210da58473a8b97ac71a14c429`,
+and `d1b1dad76b40c998b7d11095a3a7823aa27d0a1c13d92b16f0fb5c35675fb89a`.
+These tests use synthetic token bytes and real cryptographic functions, not a
+live GitHub App, secure host, secret-delivery channel or qualified governor.
+
+## Fixed-repository Git credential response
+
+`github-checkpoint-git-credential` is a native byte-level candidate that
+accepts only `get` and the exact observed HTTPS credential request for
+`github.com/cloud-itonami/itonami-bot-state.git`, then opens the signed
+issuance and constructs `username=x-access-token` / `password` protocol
+bytes. A different host, repository, pathless request, extra field or other
+operation is refused. This exact framing is intentionally conservative and
+may reject legitimate Git variants. It is not an authenticated process or a
+secret delivery channel: the host must bind the pipe, restrict the recipient,
+enforce replay/revocation, and keep plaintext out of argv, logs and files.
+
+Git normally omits the HTTP path from helper requests unless
+`credential.useHttpPath` is enabled; see [Git credential configuration](https://git-scm.com/docs/gitcredentials).
+GitHub documents the `x-access-token` username for installation-token Git
+access in its [GitHub App installation authentication guide](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation).
+The existing checkpoint Git configuration guard currently rejects credential
+helpers, so a separately reviewed, scoped host integration is still required.
+
+The source-locked Darwin native tests for that revision returned 255 for the valid
+synthetic response plus wrong-host, wrong-repository, missing-path, wrong
+operation, expired, malformed and extra-field controls. A mutant bypassing
+the exact-target check returned 113. The real local `/usr/bin/git credential
+fill`, with temporary config and `credential.useHttpPath=true`, invoked a
+signed native test helper using the diagnostic wire-41 stdin provider; it
+accepted the synthetic credential. Direct wrong-host, wrong-repository,
+missing-path and `store` controls returned no bytes. The harness captured the
+synthetic output in memory; it made no network request or real token.
+
+Git fixture image SHA-256:
+`88ff0119a0220f402e0ace724265204fd6f517d5b4b790fa46f339fd7def2582`;
+source-lock SHA-256:
+`7375f74fa33b7d470fb8c915777c2242b3da6cf5d9609bd99b3ada0741653c88`.
+Credential component, synthetic helper, Git harness and full test harness
+SHA-256 values are respectively
+`f107622ea12387076c28dd42afbfc7c743d655e7e2c2534b82089321dd76e2e0`,
+`30ee4f695a86273e02742c06fbde52386927977e660136a1f276e5104536a72b`,
+`ce3fe493620b97b583d9e968cf5a3a87d40735c86f9578fa0474b25bd137d2fc`, and
+`171395c9624b926a5c78a041feda29757ec7f055be4f38216b3fa8422b99c27e`.
+The diagnostic stdin packager SHA-256 was
+`37cc4348e95e80cc0682c8f13cfe8171f350674fff1810327d56528ae5011037`.
+This does not qualify production stdin, process lifetime, memory erasure,
+GitHub App issuance or governor, and does not deploy a helper.
+
+## Reducing explicit plaintext copies
+
+The Git credential formatter now allocates one output vector, copies the
+opened token into it, and overwrites that token vector on success or refusal.
+The caller can invoke `github-checkpoint-clear-credential!` after the response
+has been consumed to overwrite the returned vector. This is best-effort
+clearing of those particular vectors, **not** proof of secure erasure: crypto
+temporaries, allocator copies, runtime conversions, the helper pipe, Git,
+swap and OS buffers may still contain plaintext. The test helper clears the
+returned vector after its synthetic write, but its string conversion is also
+only diagnostic and is not a production secret channel.
+
+The selected actual formatter and clear functions passed a signed Darwin
+native fixture checking the returned bytes, aliased token zeroing, invalid-token
+zeroing and returned-buffer zeroing. Removing the token clear calls caused
+the fixture to fail. Fixture source SHA-256:
+`0d24cd98b49344ae1c082c6c8e7710aaed8075fa379f121551ff621f9404167c`.
+The full source-locked crypto tests also passed (including clear bitmask 7),
+and actual local Git `credential fill` again invoked the synthetic native
+helper; wrong target and store remained refused. Updated Git fixture image and
+source-lock SHA-256 were
+`070af1ce586535068eb927a6755d2cbf4d16b1089724755114682145eafbe739` and
+`73d1013c3db16be3a6cf1c6084dcc712f73d75c88f4b53228bfff01b5761aac8`.
+Current credential component SHA-256:
+`0ea140535b40e845c8f9c4f510220d2331defa7db0ac88b17b129f45297b6e51`;
+clear diagnostic SHA-256:
+`341897960003bb7157f1b4cb333d9f3a83f926f1027b48aff7dd8f33c7f25a74`;
+full test harness SHA-256:
+`f434fc5b5f1f141164e89b7bf6220a8fa798e975fe2e86b64d006fbdfa5e6cef`.
+These synthetic tests do not qualify host isolation, secret erasure, real
+credential issuance, GitHub access or the governor.
