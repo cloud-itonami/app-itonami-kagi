@@ -1,0 +1,196 @@
+;; Pure policy checks for a future GitHub App lease broker. The host must
+;; authenticate the requester, verify the owner's signed policy and issuer,
+;; pin the clock, and enforce the exact installation/repository binding.
+;; Passing these checks never issues, opens, persists or authorizes a token.
+(ns kagi.github-lease-policy
+  (:export [github-app-jwt-signing-input github-lease-request-problem github-lease-request-body github-lease-expiry-problem github-lease-provider-problem github-lease-provider-response-problem])
+  (:require [jcs.reader :refer [json-valid? json-end json-kind json-member json-element json-count json-string json-int-ok? json-int]]))
+
+;; Non-secret unsigned JWT signing input only. A trusted host must bind the
+;; App ID and fresh clock to the approved issuer and sign with a qualified
+;; RS256 provider. This output is not a JWT, credential or issuance authority.
+(defn- glp-b64url-char [n :i64] :string
+  (string-substring "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" n (+ n 1)))
+(defn- glp-b64url [s :string] :string
+  (let [b (vector-i64-from-bytes (string-to-utf8 s)) n (vector-count b)]
+    (loop [i 0 out ""]
+      (if (>= i n) out
+        (let [a (vector-at b i) have-b (< (+ i 1) n) have-c (< (+ i 2) n)
+              x (if have-b (vector-at b (+ i 1)) 0) y (if have-c (vector-at b (+ i 2)) 0)
+              part (str (glp-b64url-char (quot a 4))
+                        (glp-b64url-char (+ (* (rem a 4) 16) (quot x 16)))
+                        (if have-b (glp-b64url-char (+ (* (rem x 16) 4) (quot y 64))) "")
+                        (if have-c (glp-b64url-char (rem y 64)) ""))]
+          (recur (+ i 3) (str out part)))))))
+
+(defn github-app-jwt-signing-input [app-id :i64 now :i64] :string
+  (if (or (< app-id 1) (> app-id 9007199254740991)
+          (< now 61) (> now (- 9007199254740991 300))) ""
+    (let [header "{\"alg\":\"RS256\",\"typ\":\"JWT\"}"
+          claims (str "{\"exp\":" (+ now 300) ",\"iat\":" (- now 60)
+                      ",\"iss\":\"" app-id "\"}")]
+      (str (glp-b64url header) "." (glp-b64url claims)))))
+
+(defn- glp-repo? [s :string] :bool
+  (let [n (string-byte-length s)]
+    (and (>= n 3) (<= n 201) (< (string-index-of s "..") 0)
+         (loop [i 0 slash false segment 0]
+           (if (= i n) (and slash (> segment 0))
+             (let [c (string-code-point-at s i)]
+               (cond (= c 47) (if (and (not slash) (> segment 0)) (recur (+ i 1) true 0) false)
+                     (or (and (>= c 65) (<= c 90)) (and (>= c 97) (<= c 122))
+                         (and (>= c 48) (<= c 57)) (= c 45) (= c 95) (= c 46))
+                       (if (< segment 100) (recur (+ i 1) slash (+ segment 1)) false)
+                     :else false)))))))
+
+;; Fields named policy-* must come from an authenticated owner's policy;
+;; requester must be authenticated separately, not merely copied from request.
+;; Permission is an exact closed set: no extra GitHub permissions are implied.
+;; GitHub App installation/repository selection is independently verified by
+;; the issuer, including the token returned by the provider.
+(defn- github-lease-scope-problem [policy-repo :string policy-principal :string allow-write :bool
+                                 repo :string principal :string purpose :string permission :string] :string
+  (cond (or (not (glp-repo? policy-repo)) (not (glp-repo? repo))) "lease/repository-invalid"
+        (not (= policy-repo repo)) "lease/repository-refused"
+        (or (= policy-principal "") (= principal "") (> (string-byte-length principal) 256)
+            (not (= principal policy-principal))) "lease/principal-refused"
+        (not (= purpose "checkpoint-archive")) "lease/purpose-refused"
+        (not (or (= permission "contents:read") (= permission "contents:write"))) "lease/permission-refused"
+        (and (= permission "contents:write") (not allow-write)) "lease/write-refused"
+        :else "lease/scope-eligible"))
+
+(defn- github-lease-ttl-problem [max-ttl :i64 ttl :i64] :string
+  (if (or (< max-ttl 1) (> max-ttl 3600) (< ttl 1) (> ttl max-ttl))
+    "lease/ttl-refused" "lease/ttl-eligible"))
+
+;; Budget is exactly [owner-policy-max-ttl requested-ttl repository-id].
+;; The trusted issuer must independently bind the repository ID to the exact
+;; approved full name and installation; neither name nor ID proves that link.
+;; Both scope and budget must pass; neither result authorizes token issuance.
+(defn github-lease-request-problem [policy-repo :string policy-principal :string allow-write :bool
+                                   repo :string principal :string purpose :string permission :string
+                                   budget :vector-i64] :string
+  (let [scope (github-lease-scope-problem policy-repo policy-principal allow-write repo principal purpose permission)]
+    (cond (not (= scope "lease/scope-eligible")) scope
+          (not (= (vector-count budget) 3)) "lease/budget-invalid"
+          (not (= (github-lease-ttl-problem (vector-at budget 0) (vector-at budget 1)) "lease/ttl-eligible")) "lease/ttl-refused"
+          (or (< (vector-at budget 2) 1) (> (vector-at budget 2) 9007199254740991)) "lease/repository-id-refused"
+          :else "lease/request-eligible")))
+
+;; Build only the non-secret GitHub API body after the policy decision. The
+;; caller authenticates policy/principal and binds the pinned repository ID to
+;; the installed App. Empty means no request may be sent.
+(defn github-lease-request-body [policy-repo :string policy-principal :string allow-write :bool
+                                repo :string principal :string purpose :string permission :string
+                                budget :vector-i64] :string
+  (if (not (= (github-lease-request-problem policy-repo policy-principal allow-write repo principal purpose permission budget)
+              "lease/request-eligible")) ""
+    (str "{\"permissions\":{\"contents\":\""
+         (if (= permission "contents:write") "write" "read")
+         "\",\"metadata\":\"read\"},\"repository_ids\":[" (string-from-i64 (vector-at budget 2)) "]}")))
+
+;; Provider time is untrusted until parsed/validated. A token that cannot be
+;; proven live and within the authorized deadline is refused. Clock freshness,
+;; expiry units and token revocation remain host/provider responsibilities.
+(defn github-lease-expiry-problem [now :i64 requested-ttl :i64 expires :i64] :string
+  (cond (or (< now 1) (< requested-ttl 1) (> requested-ttl 3600)
+            (> now (- 9223372036854775807 requested-ttl))) "lease/clock-or-ttl-invalid"
+        (or (<= expires now) (> expires (+ now requested-ttl))) "lease/expiry-refused"
+        :else "lease/expiry-eligible"))
+
+
+;; All values below must be extracted from one complete authenticated provider
+;; response by a duplicate-key-rejecting, bounded parser. Numeric fields are
+;; [expected-id returned-id repo-count permission-count now ttl expires].
+;; Token bytes must not enter logs, argv, diagnostics or this pure function.
+;; Missing/incomplete scope is unknown and therefore refused. Exact count 2 is
+;; deliberately conservative if the provider adds permissions in the future.
+(defn github-lease-provider-problem [expected-repo :string returned-repo :string selection :string
+                                    expected-permission :string returned-contents :string returned-metadata :string
+                                    fields :vector-i64] :string
+  (if (not (= (vector-count fields) 7)) "lease/provider-shape-refused"
+    (let [expected-id (vector-at fields 0) returned-id (vector-at fields 1)
+          repo-count (vector-at fields 2) permission-count (vector-at fields 3)
+          now (vector-at fields 4) ttl (vector-at fields 5) expires (vector-at fields 6)]
+      (cond (or (not (glp-repo? expected-repo)) (not (= expected-repo returned-repo))
+                (< expected-id 1) (> expected-id 9007199254740991) (not (= returned-id expected-id))
+                (not (= repo-count 1)) (not (= selection "selected"))) "lease/provider-repository-refused"
+            (or (not (or (= expected-permission "contents:read") (= expected-permission "contents:write")))
+                (not (= returned-contents (if (= expected-permission "contents:write") "write" "read")))
+                (not (= returned-metadata "read")) (not (= permission-count 2))) "lease/provider-permission-refused"
+            (not (= (github-lease-expiry-problem now ttl expires) "lease/expiry-eligible")) "lease/provider-expiry-refused"
+            :else "lease/provider-eligible"))))
+
+
+(defn- glp-utc-digit? [s :string i :i64] :bool
+  (let [c (string-code-point-at s i)] (and (>= c 48) (<= c 57))))
+(defn- glp-utc-num [s :string start :i64 end :i64] :i64
+  (loop [i start n 0] (if (= i end) n (recur (+ i 1) (+ (* n 10) (- (string-code-point-at s i) 48))))))
+(defn- glp-leap? [year :i64] :bool
+  (and (= (rem year 4) 0) (or (not (= (rem year 100) 0)) (= (rem year 400) 0))))
+(defn- glp-month-days [year :i64 month :i64] :i64
+  (cond (= month 2) (if (glp-leap? year) 29 28)
+        (or (= month 4) (= month 6) (= month 9) (= month 11)) 30
+        (and (>= month 1) (<= month 12)) 31 :else 0))
+;; GitHub's observed/documented Zulu-second form only. Fractional seconds,
+;; offsets, leap seconds and years outside 2020..2100 deliberately refuse.
+(defn- glp-utc-seconds [s :string] :i64
+  (if (not (= (string-byte-length s) 20)) -1
+    (let [digits (loop [i 0]
+                   (if (= i 20) true
+                     (if (or (= i 4) (= i 7) (= i 10) (= i 13) (= i 16) (= i 19))
+                       (recur (+ i 1)) (if (glp-utc-digit? s i) (recur (+ i 1)) false))))]
+      (if (not (and digits (= (string-substring s 4 5) "-") (= (string-substring s 7 8) "-")
+                    (= (string-substring s 10 11) "T") (= (string-substring s 13 14) ":")
+                    (= (string-substring s 16 17) ":") (= (string-substring s 19 20) "Z"))) -1
+        (let [year (glp-utc-num s 0 4) month (glp-utc-num s 5 7) day (glp-utc-num s 8 10)
+              hour (glp-utc-num s 11 13) minute (glp-utc-num s 14 16) second (glp-utc-num s 17 19)]
+          (if (or (< year 2020) (> year 2100) (< month 1) (> month 12) (< day 1)
+                  (> day (glp-month-days year month)) (> hour 23) (> minute 59) (> second 59)) -1
+            (let [yd (loop [y 1970 n 0] (if (= y year) n (recur (+ y 1) (+ n (if (glp-leap? y) 366 365)))))
+                  md (loop [m 1 n 0] (if (= m month) n (recur (+ m 1) (+ n (glp-month-days year m)))))]
+              (+ (* (+ yd md (- day 1)) 86400) (* hour 3600) (* minute 60) second))))))))
+
+(defn- glp-json-string [b :vector-i64 obj :i64 key :string] :string
+  (let [p (json-member b obj key)] (if (and (>= p 0) (= (json-kind b p) 3)) (json-string b p) "")))
+
+;; Inspect token bytes in place. Refuse JSON escapes/control bytes rather than
+;; allowing a later header or credential adapter to reinterpret them. This is
+;; a conservative lexical envelope, not token authentication or a format pin.
+(defn- glp-token-raw? [b :vector-i64 p :i64] :bool
+  (if (or (< p 0) (not (= (json-kind b p) 3))) false
+    (let [end (json-end b p) n (- end p 2)]
+      (and (>= n 1) (<= n 8192)
+        (loop [i (+ p 1)]
+          (if (= i (- end 1)) true
+            (let [c (vector-at b i)]
+              (if (and (>= c 33) (<= c 126) (not (= c 34)) (not (= c 92)))
+                (recur (+ i 1)) false))))))))
+
+;; A bounded complete response is validated as one document. No token bytes
+;; are decoded, returned or logged here. The host must protect and later seal
+;; the original response, and verify TLS, installation, identity and request.
+(defn github-lease-provider-response-problem [expected-repo :string expected-id :i64 permission :string
+                                             now :i64 ttl :i64 http-status :i64 body :vector-i64] :string
+  (if (not (= http-status 201)) "lease/provider-http-refused"
+  (if (or (= (vector-count body) 0) (> (vector-count body) 262144)
+          (not (= (vector-at body 0) 123)) (not (json-valid? body)) (not (= (json-kind body 0) 1)))
+    "lease/provider-json-refused"
+    (let [token (json-member body 0 "token") repos (json-member body 0 "repositories")
+          perms (json-member body 0 "permissions") first (if (= (json-kind body repos) 2) (json-element body repos 0) -1)
+          id (if (= (json-kind body first) 1) (json-member body first "id") -1)
+          private (if (= (json-kind body first) 1) (json-member body first "private") -1)
+          token-ok (glp-token-raw? body token)
+          repo-name (if (>= first 0) (glp-json-string body first "full_name") "")
+          repo-id (if (and (>= id 0) (json-int-ok? body id)) (json-int body id) -1)
+          repo-count (if (= (json-kind body repos) 2) (json-count body repos) -1)
+          perm-count (if (= (json-kind body perms) 1) (json-count body perms) -1)
+          selection (glp-json-string body 0 "repository_selection")
+          contents (if (>= perms 0) (glp-json-string body perms "contents") "")
+          metadata (if (>= perms 0) (glp-json-string body perms "metadata") "")
+          expires (glp-utc-seconds (glp-json-string body 0 "expires_at"))]
+      (cond (>= (json-member body 0 "error") 0) "lease/provider-error-refused"
+            (not token-ok) "lease/provider-token-refused"
+            (not (= (json-kind body private) 5)) "lease/provider-private-refused"
+            :else (github-lease-provider-problem expected-repo repo-name selection permission contents metadata
+                    [expected-id repo-id repo-count perm-count now ttl expires]))))))
